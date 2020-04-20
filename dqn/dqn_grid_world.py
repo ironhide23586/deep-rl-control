@@ -21,19 +21,19 @@ import cv2
 from moviepy.editor import VideoClip
 
 
-WORLD_HEIGHT = 20
-WORLD_WIDTH = 20
-WALL_FRAC = .5
-NUM_WINS = 25
-NUM_LOSE = 35
+WORLD_HEIGHT = 16
+WORLD_WIDTH = 9
+WALL_FRAC = .2
+NUM_WINS = 5
+NUM_LOSE = 10
 
 
 class GridWorld:
 
     def __init__(self, world_height=3, world_width=4, discount_factor=.5, default_reward=-.5, wall_penalty=-.6,
-                 win_reward=5., lose_reward=-10., viz=True, patch_side=53, grid_thickness=2, arrow_thickness=1,
+                 win_reward=5., lose_reward=-10., viz=True, patch_side=120, grid_thickness=2, arrow_thickness=3,
                  wall_locs=[[1, 1], [1, 2]], win_locs=[[0, 3]], lose_locs=[[1, 3]], start_loc=[0, 0],
-                 reset_prob=.4):
+                 reset_prob=.2):
         self.world = np.ones([world_height, world_width]) * default_reward
         self.reset_prob = reset_prob
         self.world_height = world_height
@@ -75,11 +75,12 @@ class GridWorld:
         if self.viz:
             self.init_grid_canvas()
             self.video_out_fpath = 'shm_dqn_gridsolver-' + str(time.time()) + '.mp4'
-            self.clip = VideoClip(self.make_frame, duration=10)
+            self.clip = VideoClip(self.make_frame, duration=15)
 
     def make_frame(self, t):
         self.action()
-        return self.viz_canvas
+        frame = self.highlight_loc(self.viz_canvas, self.bot_rc[0], self.bot_rc[1])
+        return frame
 
     def check_terminal_state(self):
         if self.world[self.bot_rc[0], self.bot_rc[1]] == self.lose_reward \
@@ -180,6 +181,15 @@ class GridWorld:
             # print('-----> Randomly resetting to a random spawn point with probability', self.reset_prob)
             self.reset()
 
+    def highlight_loc(self, viz_in, i, j):
+        starty = i * (self.patch_side + self.grid_thickness)
+        endy = starty + self.patch_side
+        startx = j * (self.patch_side + self.grid_thickness)
+        endx = startx + self.patch_side
+        viz = viz_in.copy()
+        cv2.rectangle(viz, (startx, starty), (endx, endy), (255, 255, 255), thickness=self.grid_thickness)
+        return viz
+
     def update_viz(self, i, j):
         starty = i * (self.patch_side + self.grid_thickness)
         endy = starty + self.patch_side
@@ -205,7 +215,8 @@ class GridWorld:
             arrow_canvas = np.zeros_like(patch)
             vx = s + x_patch
             vy = s - y_patch
-            cv2.arrowedLine(arrow_canvas, (s, s), (vx, vy), (255, 255, 255), thickness=self.arrow_thickness)
+            cv2.arrowedLine(arrow_canvas, (s, s), (vx, vy), (255, 255, 255), thickness=self.arrow_thickness,
+                            tipLength=0.5)
             gridbox = (magnitude * arrow_canvas + (1 - magnitude) * patch).astype(np.uint8)
             self.viz_canvas[starty:endy, startx:endx] = gridbox
         else:
@@ -225,7 +236,7 @@ class GridWorld:
             while True:
                 self.action()
         else:
-            self.clip.write_videofile(self.video_out_fpath, fps=30)
+            self.clip.write_videofile(self.video_out_fpath, fps=460)
 
 
 def gen_world_config(h, w, wall_frac=.5, num_wins=2, num_lose=3):

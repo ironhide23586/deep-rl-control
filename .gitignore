@@ -1,3 +1,4 @@
 .idea/
 drone_control/.vs/
 *.png
+dqn/all_trained_models/

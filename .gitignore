@@ -2,3 +2,5 @@
 drone_control/.vs/
 *.png
 dqn/all_trained_models/
+dqn/__pycache__/
+dqn/logs/

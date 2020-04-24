@@ -35,6 +35,9 @@ if __name__ == '__main__':
     x_ims = []
     y_gts = []
     rewards = []
+    actions = []
+
+    experience_replay_buffer = []
 
     summary_writer = tf.summary.FileWriter('logs', dqn.sess.graph_def)
 
@@ -49,20 +52,22 @@ if __name__ == '__main__':
         fvs = tf.split(filter, splits, axis=-1)
         for i in range(len(fvs)):
             conv_summaries.append(tf.summary.image(name=filter_.name + '/' + fvs[i].name, tensor=fvs[i]))
+    random_action_prob = .5
     for step in range(10000000000):
         env.render()
         obs_old = obs_new.copy()
 
-        # random_action_prob = np.exp(-step / 10e4)
-        random_action_prob = 0.
+        random_action_prob = np.exp(-step / 10e4)
+        # random_action_prob = 0.
         if np.random.rand() < random_action_prob:
             action = env.action_space.sample()
         else:
             action_pred, y_prob, y_pred = dqn.infer(obs_old)
-            # action = action_pred[0]
-            action = np.random.choice(np.arange(18), p=y_prob[0])
+            action = action_pred[0]
+            # action = np.random.choice(np.arange(18), p=y_prob[0])
 
         obs_new, reward, done, info = env.step(action)
+
         if info['ale.lives'] < prev_num_lives:
             reward = -100.
         if reward > 0:
@@ -88,6 +93,7 @@ if __name__ == '__main__':
             x_ims.append(obs_old)
             y_gts.append(y_gt)
             rewards.append(reward)
+            actions.append(action)
         else:
             k = 0
             # print('Skipped train step...')
@@ -98,7 +104,12 @@ if __name__ == '__main__':
             y = np.squeeze(np.array(y_gts))
             if BATCH_SIZE == 1:
                 y = np.expand_dims(y, 0)
-            loss, step_tf, lr = dqn.train_step(x, y, rewards)
+            experience_replay_buffer.append([x, y, rewards, actions])
+            np.random.shuffle(experience_replay_buffer)
+            x, y, rewards, actions = experience_replay_buffer[0]
+            loss, step_tf, lr = dqn.train_step(x, y, rewards, actions)
+            if len(experience_replay_buffer) > 150:
+                experience_replay_buffer = experience_replay_buffer[-100:]
 
             for cs in conv_summaries:
                 summary_writer.add_summary(cs.eval(session=dqn.sess), global_step=step_tf)
@@ -109,6 +120,9 @@ if __name__ == '__main__':
             x_ims = []
             y_gts = []
             rewards = []
+            actions = []
+
+        random_action_prob = np.clip(1. - reward, 0, 1.)
 
         if done or info['ale.lives'] == 0:
             observation = env.reset()

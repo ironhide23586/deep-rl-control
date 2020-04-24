@@ -37,6 +37,7 @@ class DQN:
         self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, 3],
                                        name='input_x_tensor')
         self.rewards_tensor = tf.placeholder(tf.float32, shape=[None], name='rewards_tensor')
+        self.actions_tensor = tf.placeholder(tf.int32, shape=[None], name='actions_tensor')
         self.layers = [self.x_tensor]
 
         self.start_step = start_step
@@ -77,8 +78,8 @@ class DQN:
         #
         # a = tf.map_fn(self.update_fn, args, dtype=tf.float32)
 
-        self.rewards_mask = tf.one_hot(self.actions, self.num_classes) \
-                            * tf.transpose(tf.tile([self.rewards_tensor], [self.num_classes, 1]))
+        self.rewards_mask = tf.one_hot(self.actions_tensor, self.num_classes) \
+                            * .5 * tf.transpose(tf.tile([self.rewards_tensor], [self.num_classes, 1]))
         self.y_pred = self.out_op + self.rewards_mask
 
         self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.y_tensor, self.y_pred))
@@ -99,8 +100,6 @@ class DQN:
                 self.train_op = self.opt.apply_gradients(zip(grads, self.trainable_vars), global_step=self.step_ph)
         else:
             self.train_op = self.opt.apply_gradients(zip(grads, self.trainable_vars), global_step=self.step_ph)
-
-
 
         if not load_training_vars:
             self.restore_excluded_vars += [v for v in tf.all_variables() if 'Adam' in v.name or 'power' in v.name]
@@ -199,7 +198,7 @@ class DQN:
         out_label_idx, out_label_conf, out_label_logits = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im})
         return out_label_idx, out_label_conf, out_label_logits
 
-    def train_step(self, x_in, y, rewards):
+    def train_step(self, x_in, y, rewards, actions):
         if len(x_in.shape) == 3:
             x = np.expand_dims(x_in, axis=0)
         else:
@@ -210,17 +209,19 @@ class DQN:
                                                  feed_dict={self.x_tensor: x,
                                                             self.y_tensor: y,
                                                             self.rewards_tensor: rewards,
+                                                            self.actions_tensor: actions,
                                                             self.dropout_rate_tensor: self.dropout_rate})
         else:
             loss, _, step_tf, lr = self.sess.run([self.reduced_loss, self.train_op, self.step_ph, self.learn_rate_tf],
                                                  feed_dict={self.x_tensor: x,
                                                             self.y_tensor: y,
-                                                            self.rewards_tensor: rewards})
+                                                            self.rewards_tensor: rewards,
+                                                            self.actions_tensor: actions})
         self.step = step_tf
         return loss, step_tf, lr
 
     def conv_block(self, x_in, output_filters, kernel_size=3, kernel_stride=1, dilation=1, padding="VALID",
-                   batch_norm=False, activation=tf.nn.tanh, pooling=True, pool_ksize=3, pool_stride=1,
+                   batch_norm=True, activation=tf.nn.tanh, pooling=True, pool_ksize=3, pool_stride=1,
                    pool_padding="VALID", pooling_fn=tf.nn.max_pool, block_depth=1, make_residual=True,
                    compute_bn_mean_var=None):
         if compute_bn_mean_var is None:

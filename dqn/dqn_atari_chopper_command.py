@@ -12,11 +12,16 @@ Author: Souham Biswas
 Website: https://www.linkedin.com/in/souham/
 """
 
+import time
+from threading import Thread
+from queue import Queue
 
 import gym
 import numpy as np
-import tensorflow as tf
+from tqdm import tqdm
 import cv2
+
+from moviepy.editor import VideoClip
 
 from nn import DQN
 
@@ -25,24 +30,54 @@ class DQNEnvironment:
 
     def __init__(self, env_name="ChopperCommand-v0", num_lives=3, flicker_buffer_size=2,
                  sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
-                 batch_size=32):
+                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000,
+                 viz_duration_seconds=180, viz_fps=60, episodic_reward_ema_alpha=.5):
         self.env_name = env_name
         self.env = gym.make(self.env_name)
         self.num_lives = num_lives
         self.batch_size = batch_size
+        self.sync_freq = sync_freq
+        self.replay_start_size = replay_start_size
+        self.replay_break_even_train_step = 0
         self.dqn_final = DQN(num_classes=18)
         self.dqn_action = DQN(num_classes=18)
         self.step = 0
+        self.frame_count = 0
+        self.curr_train_step = 0
         self.flicker_buffer_size = flicker_buffer_size
         self.history_size = history_size
         self.sample_freq = sample_freq
         self.num_train_steps = num_train_steps
         self.replay_buffer_size = replay_buffer_size
+        self.random_action_prob = 1.
         self.replay_buffer = []
         self.nn_input = []
         self.curr_frame = None
+        self.curr_bgr_frame = None
         self.curr_action = self.env.action_space.sample()
+        self.viz = viz
+        self.curr_episode_reward = 0.
+        self.best_episode_reward = 0.
+        self.total_episode_ema_reward = 0.  # exponential moving average of all episodic rewards
+        self.episodic_reward_ema_alpha = episodic_reward_ema_alpha
+        if self.viz:
+            self.video_out_fpath = 'chopper_command_outs/shm_dqn_chopper_command-' + str(time.time()) + '.mp4'
+            self.video_buffer = Queue()
+            self.viz_duration_seconds = viz_duration_seconds
+            self.viz_fps = viz_fps
+            self.video_writer_thread = Thread(target=self.video_writer)
+            self.video_writer_thread.start()
         self.init()
+
+    def video_writer(self):
+        clip = VideoClip(self.make_frame, duration=self.viz_duration_seconds)
+        clip.write_videofile(self.video_out_fpath, fps=self.viz_fps)
+
+    def make_frame(self, t):
+        while self.video_buffer.empty():
+            time.sleep(1)
+        im = self.video_buffer.get()
+        return im
 
     def rewards_preprocess(self, reward, info):
         if info['ale.lives'] < self.num_lives:
@@ -67,17 +102,22 @@ class DQNEnvironment:
         self.populate_experience()
 
     def train_agent(self):
-        for train_step in range(self.num_train_steps):
-            self.train_step()
+        print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
+        print('Total progress-')
+        for self.curr_train_step in tqdm(range(self.num_train_steps)):
+            if self.frame_count >= self.replay_start_size:
+                self.train_step()
             for i in range(self.sample_freq):
                 self.perform_action()
             self.populate_experience()
-            if train_step % 50 == 0:
+            if self.frame_count >= self.replay_start_size:
+                self.random_action_prob = 1. - ((1. / self.num_train_steps)
+                                                * (self.curr_train_step - self.replay_break_even_train_step))
+            if self.curr_train_step % self.sync_freq == 0:
                 self.sync_params()
 
     def populate_experience(self):
-        self.random_action_prob = .9999977 ** self.step
-        if np.random.rand() < self.random_action_prob:
+        if self.frame_count < self.replay_start_size or np.random.rand() < self.random_action_prob:
               action = self.env.action_space.sample()
         else:
             action_pred, _, _ = self.dqn_final.infer(self.nn_input)
@@ -105,14 +145,34 @@ class DQNEnvironment:
         return x
 
     def perform_action(self, init_flag=False):
-        obs, reward, done, info = self.env.step(self.curr_action)
-        self.curr_frame = self.phi(obs)
+        death = False
+        self.curr_bgr_frame, reward, done, info = self.env.step(self.curr_action)
+        self.curr_episode_reward += reward
+        # if self.viz:
+        #     self.video_buffer.put([self.curr_bgr_frame,  )
+        self.frame_count += 1
+        if self.frame_count == self.replay_start_size:
+            self.replay_break_even_train_step = self.curr_train_step
+            print('----+++------REACHED REPLAY BREAK-EVEN------+++----')
+            print('Training the model now...')
+        self.curr_frame = self.phi(self.curr_bgr_frame)
         self.env.render()
         reward = self.rewards_preprocess(reward, info)
         if not init_flag:
             self.nn_input[0, :, :, :-1] = self.nn_input[0, :, :, 1:]
             self.nn_input[0, :, :, -1] = self.curr_frame
-        return reward
+        if done or self.num_lives <= 0:
+            self.curr_bgr_frame = self.env.reset()
+            self.num_lives = 3
+            self.episodic_reward_ema_alpha = self.episodic_reward_ema_alpha + (self.episodic_reward_ema_alpha \
+                                              * (self.curr_episode_reward - self.episodic_reward_ema_alpha))
+            death = True
+            if self.curr_episode_reward > self.best_episode_reward:
+                self.best_episode_reward = self.curr_episode_reward
+            self.curr_episode_reward = 0.
+            if self.viz:
+                self.video_buffer.put(self.curr_bgr_frame)
+        return reward, death
 
     def sample_from_replay_memory(self):
         idx = (np.random.sample([min(len(self.replay_buffer), self.batch_size)])
@@ -138,7 +198,8 @@ class DQNEnvironment:
             self.replay_buffer = self.replay_buffer[-self.replay_buffer_size // 2:]
         nn_input, actions, rewards, y_targ = self.sample_from_replay_memory()
         loss, step_tf, lr, discount_factor = self.dqn_action.train_step(nn_input, y_targ, rewards, actions)
-        print('Step =', step_tf, ', Loss=', loss, ', learn_rate =', lr, ', discount_factor =', discount_factor)
+        print('Step =', step_tf, ', Loss=', loss, ', learn_rate =', lr, ', discount_factor =', discount_factor,
+              ', random_action_prob =', self.random_action_prob)
 
     def sync_params(self):
         print('Syncing Params of the 2 DQNs....')
@@ -147,97 +208,6 @@ class DQNEnvironment:
 
 
 if __name__ == '__main__':
-    # dqn = DQN(num_classes=18)
-    # dqn.init()
-    # dqn.load()
-
     dqn_env = DQNEnvironment()
     dqn_env.train_agent()
     dqn_env.env.close()
-
-    #
-    # env = gym.make("ChopperCommand-v0")
-    #
-    # prev_num_lives = 3
-    # x_ims = []
-    # y_gts = []
-    # rewards = []
-    # actions = []
-    # experience_replay_buffer = []
-    #
-    # summary_writer = tf.summary.FileWriter('logs', dqn.sess.graph_def)
-    # conv_filters = [v for v in dqn.trainable_vars if 'conv' in v.name and 'bias' not in v.name]
-    # conv_summaries = []
-    # for filter_ in conv_filters:
-    #     filter = tf.transpose(filter_, [3, 0, 1, 2])
-    #     num_channels = 4
-    #     num_viz = np.ceil(filter.shape[-1].value / num_channels).astype(np.int)
-    #     splits = [num_channels] * num_viz
-    #     splits[-1] = -1
-    #     fvs = tf.split(filter, splits, axis=-1)
-    #     for i in range(len(fvs)):
-    #         conv_summaries.append(tf.summary.image(name=filter_.name + '/' + fvs[i].name, tensor=fvs[i]))
-    #
-    # s0 = env.reset()
-    # action = env.action_space.sample()
-    # s1, reward, done, info = env.step(action)
-    #
-    # for step in range(10000000000):
-    #     env.render()
-    #     obs_old = obs_new.copy()
-    #
-    #     random_action_prob = np.exp(-step / 10e4)
-    #     # random_action_prob = 0.001
-    #     if np.random.rand() < random_action_prob:
-    #         action = env.action_space.sample()
-    #     else:
-    #         action_pred, y_prob, y_pred = dqn.infer(obs_old)
-    #         action = action_pred[0]
-    #     obs_new, reward, done, info = env.step(action)
-    #
-    #     if info['ale.lives'] < prev_num_lives:
-    #         reward = -100.
-    #     prev_num_lives = info['ale.lives']
-    #
-    #     reward = np.clip(reward, -1, +1)
-    #
-    #     an, _, action_qvals_net = dqn.infer(obs_new)
-    #     y_gt = action_qvals_net.copy()
-    #     x_ims.append(obs_old)
-    #     y_gts.append(y_gt)
-    #     rewards.append(reward)
-    #     actions.append(action)
-    #
-    #     if len(x_ims) == BATCH_SIZE:
-    #         x = np.array(x_ims)
-    #         rewards = np.array(rewards)
-    #         y = np.squeeze(np.array(y_gts))
-    #         if BATCH_SIZE == 1:
-    #             y = np.expand_dims(y, 0)
-    #         experience_replay_buffer.append([x, y, rewards, actions])
-    #         np.random.shuffle(experience_replay_buffer)
-    #         x, y, rewards, actions = experience_replay_buffer[0]
-    #         loss, step_tf, lr, gamma = dqn.train_step(x, y, rewards, actions)
-    #         if len(experience_replay_buffer) > 150:
-    #             experience_replay_buffer = experience_replay_buffer[-100:]
-    #
-    #         for cs in conv_summaries:
-    #             summary_writer.add_summary(cs.eval(session=dqn.sess), global_step=step_tf)
-    #
-    #         print(step_tf, loss, random_action_prob, lr, rewards)
-    #         if step_tf % 50 == 0:
-    #             dqn.save(suffix=str(loss) + '-' + str(reward))
-    #         x_ims = []
-    #         y_gts = []
-    #         rewards = []
-    #         actions = []
-    #
-    #     random_action_prob = np.clip(1. - reward, 0, 1.)
-    #
-    #     if done or info['ale.lives'] == 0:
-    #         observation = env.reset()
-    #         prev_num_lives = 3
-    # env.close()
-
-
-

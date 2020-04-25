@@ -23,7 +23,7 @@ import cv2
 class DQN:
 
     def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
-                 learn_rate=2e-4, l2_regularizer_coeff=1e-2, num_steps=10000, dropout_rate=.3, discount_factor=.99999,
+                 learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_steps=1000000, dropout_rate=.3, discount_factor=.99,
                  update_batchnorm_means_vars=True, optimized_inference=False, load_training_vars=False):
         self.model_folder = 'all_trained_models/trained_models'
         if not os.path.isdir(self.model_folder):
@@ -44,7 +44,8 @@ class DQN:
         self.step = start_step
         self.learn_rate = learn_rate
         self.step_ph = tf.Variable(self.start_step, trainable=False, name='train_step')
-        self.discount_factor_tensor = tf.math.pow(tf.constant(discount_factor), tf.cast(self.step_ph, tf.float32))
+        # self.discount_factor_tensor = tf.math.pow(tf.constant(discount_factor), tf.cast(self.step_ph, tf.float32))
+        self.discount_factor_tensor = tf.constant(discount_factor)
 
         self.learn_rate_tf = tf.train.exponential_decay(self.learn_rate, self.step_ph, num_steps, decay_rate=0.068,
                                                         name='learn_rate')
@@ -80,13 +81,17 @@ class DQN:
         #
         # a = tf.map_fn(self.update_fn, args, dtype=tf.float32)
 
-        self.rewards_mask = tf.one_hot(self.actions_tensor, self.num_classes) \
-                            * self.discount_factor_tensor \
-                            * tf.transpose(tf.tile([self.rewards_tensor], [self.num_classes, 1]))
+        self.rewards_mask = tf.one_hot(tf.argmax(self.y_tensor, axis=1), self.num_classes) \
+                            * self.discount_factor_tensor * tf.transpose(tf.tile([self.rewards_tensor],
+                                                                                 [self.num_classes, 1]))
         self.y_pred = self.out_op
         self.y_tensor = self.y_tensor + self.rewards_mask
 
-        self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.y_tensor, self.y_pred))
+        self.y_targ = self.rewards_tensor + self.discount_factor_tensor * tf.reduce_max(self.y_tensor, axis=1)
+        actions_mask = tf.one_hot(self.actions_tensor, self.num_classes)
+        self.y_pred = tf.reduce_max(actions_mask * self.y_pred, axis=1)
+
+        self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.y_targ, self.y_pred))
 
         # self.loss_op = tf.nn.sigmoid_cross_entropy_with_logits(labels=self.y_tensor, logits=self.out_op)
 
@@ -94,7 +99,7 @@ class DQN:
         self.reduced_loss = tf.reduce_mean(self.loss_op) + tf.add_n(l2_losses)
 
         # self.opt = tf.train.AdamOptimizer(learning_rate=self.learn_rate_tf)
-        self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learn_rate_tf)
+        self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, momentum=.95)
         grads = tf.gradients(self.reduced_loss, self.trainable_vars, stop_gradients=self.stop_grad_vars)
 
         if update_batchnorm_means_vars:

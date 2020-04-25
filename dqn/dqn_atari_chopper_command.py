@@ -71,7 +71,7 @@ class DQNEnvironment:
 
     def video_writer(self):
         clip = VideoClip(self.make_frame, duration=self.viz_duration_seconds)
-        clip.write_videofile(self.video_out_fpath, fps=self.viz_fps)
+        clip.write_videofile(self.video_out_fpath, fps=self.viz_fps, verbose=False, logger=None)
 
     def make_frame(self, t):
         while self.video_buffer.empty():

@@ -22,9 +22,9 @@ import cv2
 
 class DQN:
 
-    def __init__(self, num_classes, im_w=160, im_h=210, compute_bn_mean_var=False, start_step=0, dropout_enabled=False,
-                 learn_rate=5e-4, l2_regularizer_coeff=1e-2, num_steps=10000, dropout_rate=.3,
-                 update_batchnorm_means_vars=False, optimized_inference=False, load_training_vars=False):
+    def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
+                 learn_rate=2e-4, l2_regularizer_coeff=1e-2, num_steps=10000, dropout_rate=.3, discount_factor=.99999,
+                 update_batchnorm_means_vars=True, optimized_inference=False, load_training_vars=False):
         self.model_folder = 'all_trained_models/trained_models'
         if not os.path.isdir(self.model_folder):
             os.makedirs(self.model_folder)
@@ -34,7 +34,7 @@ class DQN:
         self.im_w = im_w
         self.compute_bn_mean_var = compute_bn_mean_var
         self.optimized_inference = optimized_inference
-        self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, 3],
+        self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, 4],
                                        name='input_x_tensor')
         self.rewards_tensor = tf.placeholder(tf.float32, shape=[None], name='rewards_tensor')
         self.actions_tensor = tf.placeholder(tf.int32, shape=[None], name='actions_tensor')
@@ -44,6 +44,8 @@ class DQN:
         self.step = start_step
         self.learn_rate = learn_rate
         self.step_ph = tf.Variable(self.start_step, trainable=False, name='train_step')
+        self.discount_factor_tensor = tf.math.pow(tf.constant(discount_factor), tf.cast(self.step_ph, tf.float32))
+
         self.learn_rate_tf = tf.train.exponential_decay(self.learn_rate, self.step_ph, num_steps, decay_rate=0.068,
                                                         name='learn_rate')
         self.unsaved_vars = [self.step_ph, self.learn_rate_tf]
@@ -79,8 +81,10 @@ class DQN:
         # a = tf.map_fn(self.update_fn, args, dtype=tf.float32)
 
         self.rewards_mask = tf.one_hot(self.actions_tensor, self.num_classes) \
-                            * .5 * tf.transpose(tf.tile([self.rewards_tensor], [self.num_classes, 1]))
-        self.y_pred = self.out_op + self.rewards_mask
+                            * self.discount_factor_tensor \
+                            * tf.transpose(tf.tile([self.rewards_tensor], [self.num_classes, 1]))
+        self.y_pred = self.out_op
+        self.y_tensor = self.y_tensor + self.rewards_mask
 
         self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.y_tensor, self.y_pred))
 
@@ -141,6 +145,7 @@ class DQN:
             save_fpath = self.model_fpath_prefix + '-' + str(self.step)
         self.saver.save(self.sess, save_fpath)
         print('Model saved at', save_fpath)
+        return save_fpath
 
     def load(self, model_path=None):
         if not self.sess:
@@ -166,15 +171,16 @@ class DQN:
         print('Model restored from', model_path)
 
     def infer(self, im_in):
-        if len(im_in.shape) > 3:
-            im = ((im_in[:, :, :, [2, 1, 0]] / 255.) * 2) - 1
-        else:
-            im = np.expand_dims(((im_in[:, :, [2, 1, 0]] / 255.) * 2) - 1, 0)
+        # if len(im_in.shape) > 3:
+        #     im = ((im_in[:, :, :, [2, 1, 0]] / 255.) * 2) - 1
+        # else:
+        #     im = np.expand_dims(((im_in[:, :, [2, 1, 0]] / 255.) * 2) - 1, 0)
+        im = im_in / 255.
         if self.dropout_enabled:
-            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im,
+            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im_in,
                                                              self.dropout_rate_tensor: 0.})
         else:
-            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im})
+            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im_in})
         return outs  # TODO: somehting wrong with final conv layer output; convolution outputting all zeros
 
     def center_crop(self, x):
@@ -193,36 +199,40 @@ class DQN:
         h, w, _ = im.shape
         if h != self.im_h or w != self.im_w:
             im = cv2.resize(im, (self.im_w, self.im_h))
-        im = ((im[:, :, [2, 1, 0]] / 255.) * 2) - 1
+        # im = ((im[:, :, [2, 1, 0]] / 255.) * 2) - 1
+        im = im_in / 255.
         im = np.expand_dims(im, 0)
         out_label_idx, out_label_conf, out_label_logits = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im})
         return out_label_idx, out_label_conf, out_label_logits
 
     def train_step(self, x_in, y, rewards, actions):
-        if len(x_in.shape) == 3:
-            x = np.expand_dims(x_in, axis=0)
-        else:
-            x = x_in.copy()
-        x = ((x[:, :, :, [2, 1, 0]] / 255.) * 2) - 1
+        # if len(x_in.shape) == 3:
+        #     x = np.expand_dims(x_in, axis=0)
+        # else:
+        #     x = x_in.copy()
+        # x = ((x[:, :, :, [2, 1, 0]] / 255.) * 2) - 1
+        x = x_in / 255.
         if self.dropout_enabled:
-            loss, _, step_tf, lr = self.sess.run([self.reduced_loss, self.train_op, self.step_ph, self.learn_rate_tf],
-                                                 feed_dict={self.x_tensor: x,
-                                                            self.y_tensor: y,
-                                                            self.rewards_tensor: rewards,
-                                                            self.actions_tensor: actions,
-                                                            self.dropout_rate_tensor: self.dropout_rate})
+            loss, _, step_tf, lr, gamma = self.sess.run([self.reduced_loss, self.train_op, self.step_ph,
+                                                         self.learn_rate_tf, self.discount_factor_tensor],
+                                                        feed_dict={self.x_tensor: x,
+                                                                   self.y_tensor: y,
+                                                                   self.rewards_tensor: rewards,
+                                                                   self.actions_tensor: actions,
+                                                                   self.dropout_rate_tensor: self.dropout_rate})
         else:
-            loss, _, step_tf, lr = self.sess.run([self.reduced_loss, self.train_op, self.step_ph, self.learn_rate_tf],
-                                                 feed_dict={self.x_tensor: x,
-                                                            self.y_tensor: y,
-                                                            self.rewards_tensor: rewards,
-                                                            self.actions_tensor: actions})
+            loss, _, step_tf, lr, gamma = self.sess.run([self.reduced_loss, self.train_op, self.step_ph,
+                                                         self.learn_rate_tf, self.discount_factor_tensor],
+                                                        feed_dict={self.x_tensor: x,
+                                                                   self.y_tensor: y,
+                                                                   self.rewards_tensor: rewards,
+                                                                   self.actions_tensor: actions})
         self.step = step_tf
-        return loss, step_tf, lr
+        return loss, step_tf, lr, gamma
 
     def conv_block(self, x_in, output_filters, kernel_size=3, kernel_stride=1, dilation=1, padding="VALID",
-                   batch_norm=True, activation=tf.nn.tanh, pooling=True, pool_ksize=3, pool_stride=1,
-                   pool_padding="VALID", pooling_fn=tf.nn.max_pool, block_depth=1, make_residual=True,
+                   batch_norm=False, activation=tf.nn.relu, pooling=False, pool_ksize=3, pool_stride=1,
+                   pool_padding="VALID", pooling_fn=tf.nn.max_pool, block_depth=1, make_residual=False,
                    compute_bn_mean_var=None):
         if compute_bn_mean_var is None:
             compute_bn_mean_var = self.compute_bn_mean_var
@@ -261,14 +271,18 @@ class DQN:
         self.layers.append(curr_layer)
         return output
 
-    def dense_block(self, x_in, num_outs, batch_norm=True, biased=False, activation=tf.nn.relu6):
+    def dense_block(self, x_in, num_outs, batch_norm=False, activation=tf.nn.relu):
         curr_layer = []
+        biased = False
+        if not batch_norm:
+            biased = True
         layer_outs = tf.layers.dense(x_in, num_outs, use_bias=biased)
         curr_layer.append(layer_outs)
-        layer_outs = activation(layer_outs)
+        if activation is not None:
+            layer_outs = activation(layer_outs)
         curr_layer.append(layer_outs)
         if batch_norm:
-            layer_outs = tf.layers.batch_normalization(layer_outs, training=self.compute_bn_mean_var, axis=0)
+            layer_outs = tf.layers.batch_normalization(layer_outs, training=self.compute_bn_mean_var, axis=-1)
             curr_layer.append(layer_outs)
         if self.dropout_enabled:
             layer_outs = tf.nn.dropout(layer_outs, rate=self.dropout_rate_tensor)
@@ -281,31 +295,24 @@ class DQN:
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         return vars, update_ops
 
+    # Architecture from paper https://web.stanford.edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf
     def init_nn_graph(self):
         feature_extractor_bn_mean_var_compute = False
-        layer_outs = self.conv_block(self.x_tensor, 4, compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = self.conv_block(layer_outs, 16, pool_ksize=4, pool_stride=1, block_depth=2,
+        layer_outs = self.conv_block(self.x_tensor, 32, kernel_size=8, kernel_stride=4,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = self.conv_block(layer_outs, 128, pool_ksize=4, pool_stride=2, block_depth=1,
+        layer_outs = self.conv_block(layer_outs, 64, kernel_size=4, kernel_stride=2,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = self.conv_block(layer_outs, 256, pooling=False,
+        layer_outs = self.conv_block(layer_outs, 64, kernel_size=3, kernel_stride=1,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = self.conv_block(layer_outs, 32, pool_ksize=4, pool_stride=2, block_depth=2,
-                                     compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        # stop_grad_vars_and_ops = self.__get_nn_vars_and_ops()
-        # shp = layer_outs.shape
-        # flat_len = shp[1] * shp[2] * shp[3]
-        # layer_outs = tf.transpose(layer_outs, [3, 1, 2, 0])
-        #
-        # v0 = tf.all_variables()
-        # layer_outs = self.dense_block(tf.reshape(layer_outs, [shp[3], -1]), 256, activation=tf.nn.tanh)
-        # layer_outs = self.dense_block(layer_outs, 32, activation=tf.nn.tanh)
-        # layer_outs = self.dense_block(layer_outs, self.num_classes, activation=tf.nn.tanh)
-        # layer_outs = tf.expand_dims(tf.reduce_mean(layer_outs, axis=0), 0)
 
-        layer_outs = self.conv_block(layer_outs, self.num_classes, pool_ksize=4, pool_stride=2, block_depth=1,
-                                     compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = tf.reduce_max(tf.reduce_max(layer_outs, axis=1), axis=1)
+        stop_grad_vars_and_ops = self.__get_nn_vars_and_ops()
+        shp = layer_outs.shape
+        flat_len = shp[1] * shp[2] * shp[3]
+        # layer_outs = tf.transpose(layer_outs, [3, 1, 2, 0])
+
+        v0 = tf.all_variables()
+        layer_outs = self.dense_block(tf.reshape(layer_outs, [-1, flat_len]), 512)
+        layer_outs = self.dense_block(layer_outs, self.num_classes, activation=tf.nn.tanh)
 
         v1 = tf.all_variables()
         # restore_excluded_vars = [v for v in v1 if v not in v0]

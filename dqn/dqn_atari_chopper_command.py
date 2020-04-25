@@ -179,8 +179,8 @@ class DQNEnvironment:
         if done or self.num_lives <= 0:
             self.curr_bgr_frame = self.env.reset()
             self.num_lives = 3
-            self.episodic_reward_ema_alpha = self.episodic_reward_ema_alpha + (self.episodic_reward_ema_alpha
-                                              * (self.curr_episode_reward - self.episodic_reward_ema_alpha))
+            self.total_episode_ema_reward = self.total_episode_ema_reward + (self.episodic_reward_ema_alpha
+                                              * (self.curr_episode_reward - self.total_episode_ema_reward))
             if self.curr_episode_reward > self.best_episode_reward:
                 self.best_episode_reward = self.curr_episode_reward
             self.curr_episode_reward = 0.
@@ -211,8 +211,10 @@ class DQNEnvironment:
         nn_input, actions, rewards, y_targ = self.sample_from_replay_memory()
         loss, step_tf, lr, discount_factor = self.dqn_action.train_step(nn_input, y_targ, rewards, actions)
         self.curr_train_step += 1
-        print('Step =', step_tf, ', Loss=', loss, ', learn_rate =', lr, ', discount_factor =', discount_factor,
-              ', random_action_prob =', self.random_action_prob)
+        if self.curr_train_step % 50 == 0:
+            print('Step =', step_tf, ', Loss=', loss, ', learn_rate =', lr, ', discount_factor =', discount_factor,
+                  ', random_action_prob =', self.random_action_prob)
+            print('--> episodic_ema_reward=', self.total_episode_ema_reward)
 
     def sync_params(self):
         print('Syncing Params of the 2 DQNs....')

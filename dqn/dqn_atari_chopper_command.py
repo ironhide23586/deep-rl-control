@@ -208,7 +208,7 @@ class DQNEnvironment:
         self.best_episode_rewards.append(self.best_episode_reward)
         self.ema_episode_rewards.append(self.total_episode_ema_reward)
         self.frame_count += 1
-        if self.frame_count % 200 == 0:
+        if self.frame_count % 4000 == 0:
             self.plot_rewards()
         if self.viz:
             self.video_buffer.put([self.curr_bgr_frame, self.curr_train_step, self.frame_count,

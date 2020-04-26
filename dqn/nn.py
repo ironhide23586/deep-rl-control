@@ -47,8 +47,9 @@ class DQN:
         # self.discount_factor_tensor = tf.math.pow(tf.constant(discount_factor), tf.cast(self.step_ph, tf.float32))
         self.discount_factor_tensor = tf.constant(discount_factor)
 
-        self.learn_rate_tf = tf.train.exponential_decay(self.learn_rate, self.step_ph, num_steps, decay_rate=0.068,
-                                                        name='learn_rate')
+        # self.learn_rate_tf = tf.train.exponential_decay(self.learn_rate, self.step_ph, num_steps, decay_rate=0.068,
+        #                                                 name='learn_rate')
+        self.learn_rate_tf = tf.Variable(self.learn_rate, trainable=False, name='learn_rate')
         self.unsaved_vars = [self.step_ph, self.learn_rate_tf]
 
         self.sess = None

@@ -31,7 +31,7 @@ class DQNEnvironment:
     def __init__(self, env_name="ChopperCommand-v0", num_lives=3, flicker_buffer_size=2,
                  sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
                  batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000,
-                 viz_duration_seconds=3600*10, viz_fps=60, episodic_reward_ema_alpha=.5):
+                 viz_duration_seconds=8300, viz_fps=60, episodic_reward_ema_alpha=.5):
         self.env_name = env_name
         self.env = gym.make(self.env_name)
         self.num_lives = num_lives
@@ -124,6 +124,7 @@ class DQNEnvironment:
             self.populate_experience()
             if self.frame_count >= self.replay_start_size:
                 self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
+                self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
             if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
                 self.sync_params()
 
@@ -131,14 +132,14 @@ class DQNEnvironment:
         if self.frame_count < self.replay_start_size or np.random.rand() < self.random_action_prob:
               action = self.env.action_space.sample()
         else:
-            action_pred, _, _ = self.dqn_final.infer(self.nn_input)
+            action_pred, _, _ = self.dqn_action.infer(self.nn_input)
             action = action_pred[0]
         self.curr_action = action
         nn_input = self.nn_input.copy()
         reward, death = self.perform_action()
         experience = [nn_input[0], action, reward]
         if not death:
-            actions_targ, action_probs, action_qvals = self.dqn_action.infer(self.nn_input)
+            actions_targ, action_probs, action_qvals = self.dqn_final.infer(self.nn_input)
             action_qvals = action_qvals[0]
         else:
             action_qvals = np.zeros(self.dqn_action.num_classes)
@@ -212,8 +213,7 @@ class DQNEnvironment:
         loss, step_tf, lr, discount_factor = self.dqn_action.train_step(nn_input, y_targ, rewards, actions)
         self.curr_train_step += 1
         if self.curr_train_step % 50 == 0:
-            print('Step =', step_tf, ', Loss=', loss, ', learn_rate =', lr, ', discount_factor =', discount_factor,
-                  ', random_action_prob =', self.random_action_prob)
+            print('Step =', step_tf, ', Loss=', loss, ', random_action_prob =', self.random_action_prob)
             print('--> episodic_ema_reward=', self.total_episode_ema_reward)
 
     def sync_params(self):

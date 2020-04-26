@@ -218,7 +218,7 @@ class DQNEnvironment:
             print('----+++------REACHED REPLAY BREAK-EVEN------+++----')
             print('Training the model now...')
         self.curr_frame = self.phi(self.curr_bgr_frame)
-        self.env.render()
+        # self.env.render()
         if not init_flag:
             self.nn_input[0, :, :, :-1] = self.nn_input[0, :, :, 1:]
             self.nn_input[0, :, :, -1] = self.curr_frame

@@ -24,7 +24,7 @@ class DQN:
 
     def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
                  learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_steps=1000000, dropout_rate=.3, discount_factor=.99,
-                 update_batchnorm_means_vars=True, optimized_inference=False, load_training_vars=False):
+                 update_batchnorm_means_vars=True, optimized_inference=False, load_training_vars=True):
         self.model_folder = 'all_trained_models/trained_models'
         if not os.path.isdir(self.model_folder):
             os.makedirs(self.model_folder)
@@ -44,13 +44,13 @@ class DQN:
         self.step = start_step
         self.learn_rate = learn_rate
         self.step_ph = tf.Variable(self.start_step, trainable=False, name='train_step')
-        # self.discount_factor_tensor = tf.math.pow(tf.constant(discount_factor), tf.cast(self.step_ph, tf.float32))
         self.discount_factor_tensor = tf.constant(discount_factor)
 
         # self.learn_rate_tf = tf.train.exponential_decay(self.learn_rate, self.step_ph, num_steps, decay_rate=0.068,
         #                                                 name='learn_rate')
         self.learn_rate_tf = tf.Variable(self.learn_rate, trainable=False, name='learn_rate')
-        self.unsaved_vars = [self.step_ph, self.learn_rate_tf]
+        # self.unsaved_vars = [self.step_ph, self.learn_rate_tf]
+        self.unsaved_vars = []
 
         self.sess = None
         if self.optimized_inference:
@@ -74,14 +74,6 @@ class DQN:
 
         self.stop_grad_vars, self.stop_grad_update_ops = stop_grad_vars_and_ops
 
-        # self.loss_op = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.y_tensor,
-        #                                                               logits=self.out_op)
-
-        # args = tf.transpose(tf.stack([self.rewards_tensor, tf.cast(self.actions, tf.float32)]))
-        # args = tf.reshape(tf.concat([self.out_op, args], axis=1), [-1, 1, -1])
-        #
-        # a = tf.map_fn(self.update_fn, args, dtype=tf.float32)
-
         self.rewards_mask = tf.one_hot(tf.argmax(self.y_tensor, axis=1), self.num_classes) \
                             * self.discount_factor_tensor * tf.transpose(tf.tile([self.rewards_tensor],
                                                                                  [self.num_classes, 1]))
@@ -94,12 +86,9 @@ class DQN:
 
         self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.y_targ, self.y_pred))
 
-        # self.loss_op = tf.nn.sigmoid_cross_entropy_with_logits(labels=self.y_tensor, logits=self.out_op)
-
         l2_losses = [self.l2_regularizer_coeff * tf.nn.l2_loss(v) for v in self.trainable_vars]
         self.reduced_loss = tf.reduce_mean(self.loss_op) + tf.add_n(l2_losses)
 
-        # self.opt = tf.train.AdamOptimizer(learning_rate=self.learn_rate_tf)
         self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, momentum=.95)
         grads = tf.gradients(self.reduced_loss, self.trainable_vars, stop_gradients=self.stop_grad_vars)
 
@@ -129,16 +118,6 @@ class DQN:
             self.sess = tf.Session(config=config)
             init = tf.global_variables_initializer()
             self.sess.run(init)
-
-    # def update_fn(self, x_in):
-    #     x = x_in[0]
-    #     q = x[:self.num_classes]
-    #     # reward, action = x[self.num_classes:]
-    #     action = tf.cast(x[-1], tf.int32)
-    #     tf.one_hot()
-    #     # q = tf.scatter_nd_add(q, action, x[-2])
-    #     q[action] = q[action] + x[-2]
-    #     return q
 
     def save(self, suffix=None):
         if self.optimized_inference:
@@ -177,16 +156,12 @@ class DQN:
         print('Model restored from', model_path)
 
     def infer(self, im_in):
-        # if len(im_in.shape) > 3:
-        #     im = ((im_in[:, :, :, [2, 1, 0]] / 255.) * 2) - 1
-        # else:
-        #     im = np.expand_dims(((im_in[:, :, [2, 1, 0]] / 255.) * 2) - 1, 0)
         im = im_in / 255.
         if self.dropout_enabled:
-            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im_in,
+            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im,
                                                              self.dropout_rate_tensor: 0.})
         else:
-            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im_in})
+            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im})
         return outs  # TODO: somehting wrong with final conv layer output; convolution outputting all zeros
 
     def center_crop(self, x):
@@ -212,11 +187,6 @@ class DQN:
         return out_label_idx, out_label_conf, out_label_logits
 
     def train_step(self, x_in, y, rewards, actions):
-        # if len(x_in.shape) == 3:
-        #     x = np.expand_dims(x_in, axis=0)
-        # else:
-        #     x = x_in.copy()
-        # x = ((x[:, :, :, [2, 1, 0]] / 255.) * 2) - 1
         x = x_in / 255.
         if self.dropout_enabled:
             loss, _, step_tf, lr, gamma = self.sess.run([self.reduced_loss, self.train_op, self.step_ph,

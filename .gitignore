@@ -5,3 +5,4 @@ dqn/all_trained_models/
 dqn/__pycache__/
 dqn/logs/
 dqn/chopper_command_outs/
+*.pkl

@@ -36,7 +36,7 @@ def force_makedir(dir):
 
 class DQNEnvironment:
 
-    def __init__(self, env_name="Breakout-v0", root_dir='atari_games', num_lives=3, flicker_buffer_size=2,
+    def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2,
                  sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
                  batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60,
                  episodic_reward_ema_alpha=.99, nn_input_cache_fname='nn_input', discount_factor=.99,
@@ -51,6 +51,7 @@ class DQNEnvironment:
         self.discount_factor = discount_factor
         self.print_loss_every_n_steps = print_loss_every_n_steps
         self.env_out_dir = self.root_dir + os.sep + self.env_name
+        self.first_run = True
         force_makedir(self.env_out_dir)
         run_dirs = glob(self.env_out_dir + os.sep + '*')
         self.run_id = 0
@@ -73,7 +74,7 @@ class DQNEnvironment:
             self.video_out_dir = self.curr_env_out_dir + os.sep + 'video_outs'
             force_makedir(self.video_out_dir)
         self.env = gym.make(self.env_name)
-        self.num_lives = num_lives
+        self.num_lives = None
         self.batch_size = batch_size
         self.sync_freq = sync_freq
         self.replay_start_size = replay_start_size
@@ -164,7 +165,7 @@ class DQNEnvironment:
     def rewards_preprocess(self, reward, info):
         death = False
         if info['ale.lives'] < self.num_lives:
-            reward = -1.
+            # reward = -1.
             death = True
         self.num_lives = info['ale.lives']
         reward = np.clip(reward, -1, +1)
@@ -319,6 +320,9 @@ class DQNEnvironment:
     def perform_action(self, init_flag=False):
         self.prev_bgr_frame = self.curr_bgr_frame.copy()
         self.curr_bgr_frame, reward, done, info = self.env.step(self.curr_action)
+        if self.first_run:
+            self.first_run = False
+            self.num_lives = info['ale.lives']
         self.phi()
         if self.render:
             self.env.render()
@@ -343,7 +347,7 @@ class DQNEnvironment:
             self.nn_input[0, :, :, -1] = self.curr_frame
         if done or self.num_lives <= 0:
             self.curr_bgr_frame = self.env.reset()
-            self.num_lives = 3
+            self.first_run = True
             self.total_episode_ema_reward = self.total_episode_ema_reward + (self.episodic_reward_ema_alpha
                                               * (self.curr_episode_reward - self.total_episode_ema_reward))
             if self.curr_episode_reward > self.best_episode_reward:

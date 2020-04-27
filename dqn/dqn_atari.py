@@ -159,7 +159,7 @@ class DQNEnvironment:
             cv2.putText(im, 'Best=' + str(round(best_episode_reward, 3)), (90, 205), cv2.FONT_HERSHEY_SIMPLEX, .35,
                         (0, 255, 0))
             cv2.putText(im, str(round(random_action_prob, 3)), (120, 180), cv2.FONT_HERSHEY_SIMPLEX, .35,
-                        (13, 0, 0))
+                        (255, 255, 255))
             self.viz_frame_buffer.append(im)
 
     def rewards_preprocess(self, reward, info):
@@ -215,36 +215,39 @@ class DQNEnvironment:
             self.plot_frame_indices, self.curr_episode_rewards, \
             self.best_episode_rewards, self.ema_episode_rewards = pickle.load(open(self.prev_rewards_data_cache_fpath,
                                                                                    'rb'))
-            self.frame_count = self.plot_frame_indices[-1]
-            self.best_episode_reward = self.best_episode_rewards[-1]
+            if len(self.plot_frame_indices) > 0:
+                self.frame_count = self.plot_frame_indices[-1]
+            if len(self.best_episode_rewards) > 0:
+                self.best_episode_reward = self.best_episode_rewards[-1]
             if self.frame_count > self.replay_start_size:
                 self.print_train_start_text()
         if os.path.isfile(self.prev_loss_data_cache_fpath):
             print(self.prev_loss_data_cache_fpath, 'found!, reading from it...')
             self.plot_loss_frame_counts, self.plot_loss_train_steps, \
             self.plot_losses, self.plot_l2_losses = pickle.load(open(self.prev_loss_data_cache_fpath, 'rb'))
-            self.curr_train_step = self.plot_loss_train_steps[-1]
+            if len(self.plot_loss_train_steps) > 0:
+                self.curr_train_step = self.plot_loss_train_steps[-1]
         self.sync_and_save_params(init_mode=True)
 
     def train_agent(self):
-        # try:
-        print('Total progress-')
-        if self.frame_count < self.replay_start_size:
-            print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
-        while self.curr_train_step < self.num_train_steps:
-            if self.frame_count >= self.replay_start_size:
-                self.train_step()
-            for i in range(self.sample_freq):
-                self.perform_action()
-            self.populate_experience()
-            if self.frame_count >= self.replay_start_size:
-                self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
-                self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
-            if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
-                self.sync_and_save_params()
-        self.die()
-        # except:
-        #     self.die()
+        try:
+            print('Starting progress...')
+            if self.frame_count < self.replay_start_size:
+                print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
+            while self.curr_train_step < self.num_train_steps:
+                if self.frame_count >= self.replay_start_size:
+                    self.train_step()
+                for i in range(self.sample_freq):
+                    self.perform_action()
+                self.populate_experience()
+                if self.frame_count >= self.replay_start_size:
+                    self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
+                    self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
+                if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
+                    self.sync_and_save_params()
+            self.die()
+        except:
+            self.die()
 
     def print_train_start_text(self):
         print('----+++------REACHED REPLAY BREAK-EVEN at frame', self.frame_count, '------+++----')

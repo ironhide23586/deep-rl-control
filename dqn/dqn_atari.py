@@ -36,13 +36,13 @@ def force_makedir(dir):
 
 class DQNEnvironment:
 
-    def __init__(self, env_name="ChopperCommand-v0", root_dir='atari_games', num_lives=3, flicker_buffer_size=2,
-                 sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000,
-                 batch_size=32, viz=True, sync_freq=200, replay_start_size=100, viz_fps=60,
+    def __init__(self, env_name="Breakout-v0", root_dir='atari_games', num_lives=3, flicker_buffer_size=2,
+                 sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
+                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60,
                  episodic_reward_ema_alpha=.99, nn_input_cache_fname='nn_input', discount_factor=.99,
                  replay_memory_cache_fname='replay_memory', rewards_data_cache_fname='rewards_history',
                  loss_data_cache_fname='training_history', video_prefix='shm_dqn', run_dir_prefix='run',
-                 print_loss_every_n_steps=100, render=True, plot_stride=50):
+                 print_loss_every_n_steps=100, render=True, plot_stride=100):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps
@@ -122,6 +122,7 @@ class DQNEnvironment:
         self.plot_losses = []
         self.plot_l2_losses = []
         self.viz_frame_buffer = []
+        self.viz_out_buffer = []
         self.curr_frame = None
         self.curr_bgr_frame = None
         self.prev_bgr_frame = None
@@ -135,10 +136,11 @@ class DQNEnvironment:
         self.episodic_reward_ema_alpha = episodic_reward_ema_alpha
         self.video_buffer = Queue()
         self.init()
-        self.start_train_step = self.curr_train_step
+        self.video_start_train_step = self.curr_train_step
+        self.video_end_train_step = self.curr_train_step
         if self.viz:
-            self.video_writer_thread = Thread(target=self.make_frame)
-            self.video_writer_thread.start()
+            self.frame_writer_thread = Thread(target=self.make_frame)
+            self.frame_writer_thread.start()
 
     def make_frame(self):
         while self.isalive:
@@ -168,13 +170,21 @@ class DQNEnvironment:
         reward = np.clip(reward, -1, +1)
         return reward, death
 
+    def write_video_worker(self):
+        if len(self.viz_out_buffer) > 0:
+            video_out_fpath = self.video_out_fpath_prefix + str(self.video_start_train_step) + '-' \
+                              + str(self.video_end_train_step) + '.mp4'
+            self.video_start_train_step = self.video_end_train_step + 1
+            clip = ImageSequenceClip(self.viz_out_buffer, fps=self.viz_fps)
+            clip.write_videofile(video_out_fpath, fps=self.viz_fps, verbose=False, logger=None)
+            self.viz_out_buffer = []
+
     def write_video(self):
-        if len(self.viz_frame_buffer) > 0:
-            video_out_fpath = self.video_out_fpath_prefix + str(self.start_train_step) + '-' + str(self.curr_train_step) \
-                              + '.mp4'
-            clip = ImageSequenceClip(self.viz_frame_buffer, fps=self.viz_fps)
-            clip.write_videofile(video_out_fpath, fps=self.viz_fps)
-            self.viz_frame_buffer = []
+        self.video_end_train_step = self.curr_train_step
+        self.viz_out_buffer = [im.copy() for im in self.viz_frame_buffer]
+        self.viz_frame_buffer = []
+        video_writer_thread = Thread(target=self.write_video_worker)
+        video_writer_thread.start()
 
     def init(self):
         self.curr_bgr_frame = self.env.reset()
@@ -217,8 +227,9 @@ class DQNEnvironment:
 
     def train_agent(self):
         # try:
-        print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
         print('Total progress-')
+        if self.frame_count < self.replay_start_size:
+            print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
         while self.curr_train_step < self.num_train_steps:
             if self.frame_count >= self.replay_start_size:
                 self.train_step()
@@ -246,7 +257,7 @@ class DQNEnvironment:
         self.dqn_constant.sess.close()
         self.plot_stats()
         if self.viz:
-            self.video_writer_thread.join()
+            self.frame_writer_thread.join()
         print('Exiting....🏃')
 
     def plot_stats(self):
@@ -393,6 +404,7 @@ class DQNEnvironment:
                          self.plot_losses, self.plot_l2_losses],
                         open(self.curr_loss_data_cache_fpath + suffix, 'wb'))
             self.write_video()
+            k = 0
 
 
 if __name__ == '__main__':

@@ -24,11 +24,16 @@ class DQN:
 
     def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
                  learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_steps=1000000, dropout_rate=.3, discount_factor=.99,
-                 update_batchnorm_means_vars=True, optimized_inference=False, load_training_vars=True):
-        self.model_folder = 'all_trained_models/trained_models'
+                 update_batchnorm_means_vars=True, optimized_inference=False, load_training_vars=True,
+                 model_folder=None, model_prefix='model'):
+        if model_folder is None:
+            self.model_folder = 'all_trained_models/trained_models'
+        else:
+            self.model_folder = model_folder
         if not os.path.isdir(self.model_folder):
             os.makedirs(self.model_folder)
-        self.model_fpath_prefix = self.model_folder + '/' + 'dqn_atari_chopper_command-'
+        self.model_prefix = model_prefix
+        self.model_fpath_prefix = self.model_folder + '/' + model_prefix + '-'
         self.num_classes = num_classes
         self.im_h = im_h
         self.im_w = im_w
@@ -46,64 +51,44 @@ class DQN:
         self.step_ph = tf.Variable(self.start_step, trainable=False, name='train_step')
         self.discount_factor_tensor = tf.constant(discount_factor)
 
-        # self.learn_rate_tf = tf.train.exponential_decay(self.learn_rate, self.step_ph, num_steps, decay_rate=0.068,
-        #                                                 name='learn_rate')
         self.learn_rate_tf = tf.Variable(self.learn_rate, trainable=False, name='learn_rate')
-        # self.unsaved_vars = [self.step_ph, self.learn_rate_tf]
         self.unsaved_vars = []
 
         self.sess = None
         if self.optimized_inference:
             self.dropout_enabled = False
-            self.out_op, _, _, _ = self.init_nn_graph()
-            self.outs_softmax_op = tf.nn.softmax(self.out_op)
-            self.outs_final = tf.argmax(self.outs_softmax_op, axis=-1), self.outs_softmax_op, self.out_op
+            self.y_pred, _, _, _ = self.init_nn_graph()
+            self.outs_softmax_op = tf.nn.softmax(self.y_pred)
+            self.outs_final = tf.argmax(self.outs_softmax_op, axis=-1), self.outs_softmax_op, self.y_pred
             self.vars_to_keep = [v for v in tf.global_variables() if v not in self.unsaved_vars]
             self.restorer = tf.train.Saver(var_list=self.vars_to_keep)
             return
         self.dropout_enabled = dropout_enabled
         self.l2_regularizer_coeff = l2_regularizer_coeff
-        self.y_tensor = tf.placeholder(tf.float32, shape=(None, self.num_classes), name='input_y_qvals')
+        self.y_gt = tf.placeholder(tf.float32, shape=[None], name='qvals_gt')
         if self.dropout_enabled:
             self.dropout_rate = dropout_rate
             self.dropout_rate_tensor = tf.placeholder(tf.float32, shape=())
-        self.out_op, self.trainable_vars, self.restore_excluded_vars, stop_grad_vars_and_ops = self.init_nn_graph()
-        self.outs_softmax_op = tf.nn.softmax(self.out_op)
-        self.actions = tf.argmax(self.out_op, axis=-1)
-        self.outs_final = self.actions, self.outs_softmax_op, self.out_op
+        self.y_pred, self.trainable_vars, self.restore_excluded_vars, stop_grad_vars_and_ops = self.init_nn_graph()
+        self.outs_softmax_op = tf.nn.softmax(self.y_pred)
+        self.actions = tf.argmax(self.y_pred, axis=-1)
+        self.outs_final = self.actions, self.outs_softmax_op, self.y_pred
 
         self.stop_grad_vars, self.stop_grad_update_ops = stop_grad_vars_and_ops
 
-        self.rewards_mask = tf.one_hot(tf.argmax(self.y_tensor, axis=1), self.num_classes) \
-                            * self.discount_factor_tensor * tf.transpose(tf.tile([self.rewards_tensor],
-                                                                                 [self.num_classes, 1]))
-        self.y_pred = self.out_op
-        self.y_tensor = self.y_tensor + self.rewards_mask
+        self.actions_mask_pred = tf.one_hot(self.actions_tensor, self.num_classes)
+        y_pred_rewards_mask = self.y_pred * self.actions_mask_pred
+        self.q_pred = tf.reduce_max(y_pred_rewards_mask, axis=1) + tf.reduce_min(y_pred_rewards_mask, axis=1)
 
-        self.y_targ = self.rewards_tensor + self.discount_factor_tensor * tf.reduce_max(self.y_tensor, axis=1)
-        actions_mask = tf.one_hot(self.actions_tensor, self.num_classes)
-        self.y_pred = tf.reduce_max(actions_mask * self.y_pred, axis=1)
-
-        self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.y_targ, self.y_pred))
+        self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.q_pred, self.y_gt))
 
         l2_losses = [self.l2_regularizer_coeff * tf.nn.l2_loss(v) for v in self.trainable_vars]
-        self.reduced_loss = tf.reduce_mean(self.loss_op) + tf.add_n(l2_losses)
-
+        self.loss = tf.reduce_mean(self.loss_op)
+        self.reduced_loss = self.loss + tf.add_n(l2_losses)
+        self.grads_tensor = None
         self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, momentum=.95)
-        grads = tf.gradients(self.reduced_loss, self.trainable_vars, stop_gradients=self.stop_grad_vars)
-
-        if update_batchnorm_means_vars:
-            update_ops_all = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-            update_ops = [op for op in update_ops_all if op not in self.stop_grad_update_ops]
-            with tf.control_dependencies(update_ops):
-                self.train_op = self.opt.apply_gradients(zip(grads, self.trainable_vars), global_step=self.step_ph)
-        else:
-            self.train_op = self.opt.apply_gradients(zip(grads, self.trainable_vars), global_step=self.step_ph)
-
-        if not load_training_vars:
-            self.restore_excluded_vars += [v for v in tf.all_variables() if 'Adam' in v.name or 'power' in v.name]
-        else:
-            self.restore_excluded_vars += []
+        self.train_op = self.opt.minimize(self.reduced_loss, global_step=self.step_ph, var_list=self.trainable_vars,
+                                          grad_loss=self.grads_tensor, name='rmsprop_train_op')
 
         self.vars_to_keep = [v for v in tf.global_variables() if v not in self.unsaved_vars]
         self.vars_to_restore = [v for v in self.vars_to_keep if v not in self.restore_excluded_vars]
@@ -121,7 +106,7 @@ class DQN:
 
     def save(self, suffix=None):
         if self.optimized_inference:
-            self.restorer.save(self.sess, 'dqn_atari_chopper_command')
+            self.restorer.save(self.sess, self.model_prefix)
             print('Model Saved in optimized inference mode')
             return
         if suffix:
@@ -136,8 +121,15 @@ class DQN:
         if not self.sess:
             self.init()
         if model_path is None:
-            if os.path.isdir(self.model_folder):
-                existing_paths = glob(self.model_folder + '/*.index')
+            model_folder = self.model_folder
+            if 'run-' in self.model_folder:
+                curr_run_id = int(self.model_folder.split('run-')[-1].split(os.sep)[0])
+                mf = self.model_folder.replace('run-' + str(curr_run_id), 'run-' + str(curr_run_id - 1))
+                if os.path.isdir(mf):
+                    if len(glob(mf + os.sep + '*')) > 0:
+                        model_folder = mf
+            if os.path.isdir(model_folder):
+                existing_paths = glob(model_folder + '/*.index')
                 if len(existing_paths) == 0:
                     print('No model found to restore from, initializing random weights')
                     return
@@ -157,6 +149,7 @@ class DQN:
 
     def infer(self, im_in):
         im = im_in / 255.
+        # self.viz_inputs(im, 'infer')
         if self.dropout_enabled:
             outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im,
                                                              self.dropout_rate_tensor: 0.})
@@ -180,31 +173,38 @@ class DQN:
         h, w, _ = im.shape
         if h != self.im_h or w != self.im_w:
             im = cv2.resize(im, (self.im_w, self.im_h))
-        # im = ((im[:, :, [2, 1, 0]] / 255.) * 2) - 1
         im = im_in / 255.
         im = np.expand_dims(im, 0)
         out_label_idx, out_label_conf, out_label_logits = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im})
         return out_label_idx, out_label_conf, out_label_logits
 
+    def viz_inputs(self, x, prefix=''):
+        if not os.path.isdir('misc'):
+            os.makedirs('misc')
+        for b in range(x.shape[0]):
+            a = x[b]
+            a = (a * 255).astype(np.uint8)
+            for i in range(a.shape[-1]):
+                cv2.imwrite('misc/' + prefix + str(b) + '-' + str(i) + '.png', a[:, :, i])
+
     def train_step(self, x_in, y, rewards, actions):
         x = x_in / 255.
+        # self.viz_inputs(x, 'train')
         if self.dropout_enabled:
-            loss, _, step_tf, lr, gamma = self.sess.run([self.reduced_loss, self.train_op, self.step_ph,
-                                                         self.learn_rate_tf, self.discount_factor_tensor],
-                                                        feed_dict={self.x_tensor: x,
-                                                                   self.y_tensor: y,
-                                                                   self.rewards_tensor: rewards,
-                                                                   self.actions_tensor: actions,
-                                                                   self.dropout_rate_tensor: self.dropout_rate})
+            l2_loss, loss, _, step_tf = self.sess.run([self.reduced_loss, self.loss, self.train_op, self.step_ph],
+                                                      feed_dict={self.x_tensor: x,
+                                                                 self.y_gt: y,
+                                                                 self.rewards_tensor: rewards,
+                                                                 self.actions_tensor: actions,
+                                                                 self.dropout_rate_tensor: self.dropout_rate})
         else:
-            loss, _, step_tf, lr, gamma = self.sess.run([self.reduced_loss, self.train_op, self.step_ph,
-                                                         self.learn_rate_tf, self.discount_factor_tensor],
-                                                        feed_dict={self.x_tensor: x,
-                                                                   self.y_tensor: y,
-                                                                   self.rewards_tensor: rewards,
-                                                                   self.actions_tensor: actions})
+            l2_loss, loss, _, step_tf = self.sess.run([self.reduced_loss, self.loss, self.train_op, self.step_ph],
+                                                      feed_dict={self.x_tensor: x,
+                                                                 self.y_gt: y,
+                                                                 self.rewards_tensor: rewards,
+                                                                 self.actions_tensor: actions})
         self.step = step_tf
-        return loss, step_tf, lr, gamma
+        return l2_loss, loss, step_tf
 
     def conv_block(self, x_in, output_filters, kernel_size=3, kernel_stride=1, dilation=1, padding="VALID",
                    batch_norm=False, activation=tf.nn.relu, pooling=False, pool_ksize=3, pool_stride=1,
@@ -288,7 +288,8 @@ class DQN:
 
         v0 = tf.all_variables()
         layer_outs = self.dense_block(tf.reshape(layer_outs, [-1, flat_len]), 512)
-        layer_outs = self.dense_block(layer_outs, self.num_classes, activation=tf.nn.tanh)
+        layer_outs = self.dense_block(layer_outs, self.num_classes, activation=None)
+        layer_outs = tf.identity(layer_outs, name='qval_pred')
 
         v1 = tf.all_variables()
         # restore_excluded_vars = [v for v in v1 if v not in v0]

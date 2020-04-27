@@ -6,3 +6,5 @@ dqn/__pycache__/
 dqn/logs/
 dqn/chopper_command_outs/
 *.pkl
+dqn/atari_games/
+dqn/misc/

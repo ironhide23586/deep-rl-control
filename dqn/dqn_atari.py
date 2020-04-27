@@ -24,7 +24,7 @@ import numpy as np
 from tqdm import tqdm
 import cv2
 from matplotlib import pyplot as plt
-from moviepy.editor import VideoClip
+from moviepy.editor import ImageSequenceClip
 
 from nn import DQN
 
@@ -37,8 +37,8 @@ def force_makedir(dir):
 class DQNEnvironment:
 
     def __init__(self, env_name="ChopperCommand-v0", root_dir='atari_games', num_lives=3, flicker_buffer_size=2,
-                 sample_freq=2, replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
-                 batch_size=32, viz=True, sync_freq=4000, replay_start_size=2000, viz_fps=60,
+                 sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000,
+                 batch_size=32, viz=True, sync_freq=200, replay_start_size=100, viz_fps=60,
                  episodic_reward_ema_alpha=.99, nn_input_cache_fname='nn_input', discount_factor=.99,
                  replay_memory_cache_fname='replay_memory', rewards_data_cache_fname='rewards_history',
                  loss_data_cache_fname='training_history', video_prefix='shm_dqn', run_dir_prefix='run',
@@ -98,9 +98,7 @@ class DQNEnvironment:
                                              + '-' + prev_suffix
         self.prev_loss_data_cache_fpath = self.prev_caches_dir + os.sep + loss_data_cache_fname + '-' + prev_suffix
         
-        self.video_out_fpath = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-' + str(
-            time.time()) + '.mp4'
-        self.build_out_dirs()
+        self.video_out_fpath_prefix = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-'
         self.dqn_constant = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
                                 model_prefix=self.env_name)
         self.dqn_action = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
@@ -123,9 +121,12 @@ class DQNEnvironment:
         self.plot_loss_frame_counts = []
         self.plot_losses = []
         self.plot_l2_losses = []
+        self.viz_frame_buffer = []
         self.curr_frame = None
         self.curr_bgr_frame = None
         self.prev_bgr_frame = None
+        self.clip = None
+        self.isalive = True
         self.curr_action = self.env.action_space.sample()
         self.viz = viz
         self.curr_episode_reward = 0.
@@ -134,33 +135,29 @@ class DQNEnvironment:
         self.episodic_reward_ema_alpha = episodic_reward_ema_alpha
         self.video_buffer = Queue()
         self.init()
+        self.start_train_step = self.curr_train_step
         if self.viz:
-            self.video_writer_thread = Thread(target=self.video_writer)
+            self.video_writer_thread = Thread(target=self.make_frame)
             self.video_writer_thread.start()
 
-    def build_out_dirs(self):
-        force_makedir(self.env_out_dir)
-
-    def video_writer(self):
-        clip = VideoClip(self.make_frame, duration=3600*1000)
-        clip.write_videofile(self.video_out_fpath, fps=self.viz_fps, verbose=False, logger=None)
-
-    def make_frame(self, t):
-        while self.video_buffer.empty():
-            time.sleep(1)
-        im, train_step, frame_count, curr_episode_reward, \
-        best_episode_reward, total_episode_ema_reward, random_action_prob = self.video_buffer.get()
-        cv2.putText(im, str(frame_count), (130, 10), cv2.FONT_HERSHEY_SIMPLEX, .3, (255, 255, 255))
-        cv2.putText(im, str(train_step), (2, 10), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 0, 255))
-        cv2.putText(im, 'EMA=' + str(round(total_episode_ema_reward, 3)), (50, 10), cv2.FONT_HERSHEY_SIMPLEX, .35,
-                    (255, 255, 0))
-        cv2.putText(im, 'Current=' + str(round(curr_episode_reward, 3)), (2, 205), cv2.FONT_HERSHEY_SIMPLEX, .35,
-                    (255, 255, 0))
-        cv2.putText(im, 'Best=' + str(round(best_episode_reward, 3)), (90, 205), cv2.FONT_HERSHEY_SIMPLEX, .35,
-                    (0, 255, 0))
-        cv2.putText(im, str(round(random_action_prob, 3)), (120, 180), cv2.FONT_HERSHEY_SIMPLEX, .35,
-                    (13, 0, 0))
-        return im
+    def make_frame(self):
+        while self.isalive:
+            if self.video_buffer.empty():
+                time.sleep(1)
+                continue
+            im, train_step, frame_count, curr_episode_reward, \
+            best_episode_reward, total_episode_ema_reward, random_action_prob = self.video_buffer.get()
+            cv2.putText(im, str(frame_count), (130, 10), cv2.FONT_HERSHEY_SIMPLEX, .3, (255, 255, 255))
+            cv2.putText(im, str(train_step), (2, 10), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 0, 255))
+            cv2.putText(im, 'EMA=' + str(round(total_episode_ema_reward, 3)), (50, 10), cv2.FONT_HERSHEY_SIMPLEX, .35,
+                        (255, 255, 0))
+            cv2.putText(im, 'Current=' + str(round(curr_episode_reward, 3)), (2, 205), cv2.FONT_HERSHEY_SIMPLEX, .35,
+                        (255, 255, 0))
+            cv2.putText(im, 'Best=' + str(round(best_episode_reward, 3)), (90, 205), cv2.FONT_HERSHEY_SIMPLEX, .35,
+                        (0, 255, 0))
+            cv2.putText(im, str(round(random_action_prob, 3)), (120, 180), cv2.FONT_HERSHEY_SIMPLEX, .35,
+                        (13, 0, 0))
+            self.viz_frame_buffer.append(im)
 
     def rewards_preprocess(self, reward, info):
         death = False
@@ -170,6 +167,14 @@ class DQNEnvironment:
         self.num_lives = info['ale.lives']
         reward = np.clip(reward, -1, +1)
         return reward, death
+
+    def write_video(self):
+        if len(self.viz_frame_buffer) > 0:
+            video_out_fpath = self.video_out_fpath_prefix + str(self.start_train_step) + '-' + str(self.curr_train_step) \
+                              + '.mp4'
+            clip = ImageSequenceClip(self.viz_frame_buffer, fps=self.viz_fps)
+            clip.write_videofile(video_out_fpath, fps=self.viz_fps)
+            self.viz_frame_buffer = []
 
     def init(self):
         self.curr_bgr_frame = self.env.reset()
@@ -207,26 +212,27 @@ class DQNEnvironment:
             print(self.prev_loss_data_cache_fpath, 'found!, reading from it...')
             self.plot_loss_frame_counts, self.plot_loss_train_steps, \
             self.plot_losses, self.plot_l2_losses = pickle.load(open(self.prev_loss_data_cache_fpath, 'rb'))
+            self.curr_train_step = self.plot_loss_train_steps[-1]
         self.sync_and_save_params(init_mode=True)
 
     def train_agent(self):
-        try:
-            print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
-            print('Total progress-')
-            while self.curr_train_step < self.num_train_steps:
-                if self.frame_count >= self.replay_start_size:
-                    self.train_step()
-                for i in range(self.sample_freq):
-                    self.perform_action()
-                self.populate_experience()
-                if self.frame_count >= self.replay_start_size:
-                    self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
-                    self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
-                if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
-                    self.sync_and_save_params()
-            self.die()
-        except:
-            self.die()
+        # try:
+        print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
+        print('Total progress-')
+        while self.curr_train_step < self.num_train_steps:
+            if self.frame_count >= self.replay_start_size:
+                self.train_step()
+            for i in range(self.sample_freq):
+                self.perform_action()
+            self.populate_experience()
+            if self.frame_count >= self.replay_start_size:
+                self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
+                self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
+            if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
+                self.sync_and_save_params()
+        self.die()
+        # except:
+        #     self.die()
 
     def print_train_start_text(self):
         print('----+++------REACHED REPLAY BREAK-EVEN at frame', self.frame_count, '------+++----')
@@ -234,15 +240,16 @@ class DQNEnvironment:
 
     def die(self):
         print('💀💀💀💀💀💀💀💀💀💀💀💀💀💀💀💀💀💀-----> DEATH <-----💀💀💀💀💀💀💀💀💀💀💀💀💀💀💀💀💀💀')
+        self.isalive = False
         self.sync_and_save_params()
         self.dqn_action.sess.close()
         self.dqn_constant.sess.close()
+        self.plot_stats()
         if self.viz:
-            self.clip.close()
             self.video_writer_thread.join()
         print('Exiting....🏃')
 
-    def plot_rewards(self):
+    def plot_stats(self):
         idx = np.linspace(0, len(self.plot_frame_indices) - 1,
                           len(self.plot_frame_indices) // self.plot_stride).astype(np.int)
         frame_indices = np.array(self.plot_frame_indices)[idx]
@@ -312,7 +319,7 @@ class DQNEnvironment:
         self.ema_episode_rewards.append(self.total_episode_ema_reward)
         self.frame_count += 1
         if self.frame_count % 500 == 0:
-            self.plot_rewards()
+            self.plot_stats()
         if self.viz:
             self.video_buffer.put([self.curr_bgr_frame.copy(), self.curr_train_step, self.frame_count,
                                    self.curr_episode_reward, self.best_episode_reward, self.total_episode_ema_reward,
@@ -385,6 +392,7 @@ class DQNEnvironment:
             pickle.dump([self.plot_loss_frame_counts, self.plot_loss_train_steps,
                          self.plot_losses, self.plot_l2_losses],
                         open(self.curr_loss_data_cache_fpath + suffix, 'wb'))
+            self.write_video()
 
 
 if __name__ == '__main__':

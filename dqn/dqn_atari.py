@@ -44,8 +44,8 @@ def force_delete(fpath):
 class DQNEnvironment:
 
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2,
-                 sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
-                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60,
+                 sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000,
+                 batch_size=32, viz=True, sync_freq=200, replay_start_size=100, viz_fps=60,
                  episodic_reward_ema_alpha=.99, nn_input_cache_fname='nn_input', discount_factor=.99,
                  replay_memory_cache_fname='replay_memory', rewards_data_cache_fname='rewards_history',
                  loss_data_cache_fname='training_history', video_prefix='shm_dqn', run_dir_prefix='run',
@@ -322,7 +322,7 @@ class DQNEnvironment:
         max_qval = reward + self.discount_factor * action_qvals.max()
         if death:
             max_qval = reward
-        experience = [nn_input[0], action, max_qval, max_qval]
+        experience = [nn_input[0], action, max_qval]
         if len(self.replay_buffer) == 0:
             self.replay_buffer = [experience]
         else:
@@ -397,8 +397,8 @@ class DQNEnvironment:
     def train_step(self):
         if len(self.replay_buffer) > self.replay_buffer_size:
             self.replay_buffer = self.replay_buffer[-self.replay_buffer_size // 2:]
-        nn_input, actions, rewards, y_targ = self.sample_from_replay_memory()
-        l2_loss, loss, step_tf = self.dqn_action.train_step(nn_input, y_targ, rewards, actions)
+        nn_input, actions, y_targ = self.sample_from_replay_memory()
+        l2_loss, loss, step_tf = self.dqn_action.train_step(nn_input, y_targ, actions)
         self.curr_train_step = step_tf
         self.plot_loss_frame_counts.append(self.frame_count)
         self.plot_loss_train_steps.append(self.curr_train_step)

@@ -41,7 +41,6 @@ class DQN:
         self.optimized_inference = optimized_inference
         self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, 4],
                                        name='input_x_tensor')
-        self.rewards_tensor = tf.placeholder(tf.float32, shape=[None], name='rewards_tensor')
         self.actions_tensor = tf.placeholder(tf.int32, shape=[None], name='actions_tensor')
         self.layers = [self.x_tensor]
 
@@ -187,21 +186,19 @@ class DQN:
             for i in range(a.shape[-1]):
                 cv2.imwrite('misc/' + prefix + str(b) + '-' + str(i) + '.png', a[:, :, i])
 
-    def train_step(self, x_in, y, rewards, actions):
+    def train_step(self, x_in, y, actions):
         x = x_in / 255.
         # self.viz_inputs(x, 'train')
         if self.dropout_enabled:
             l2_loss, loss, _, step_tf = self.sess.run([self.reduced_loss, self.loss, self.train_op, self.step_ph],
                                                       feed_dict={self.x_tensor: x,
                                                                  self.y_gt: y,
-                                                                 self.rewards_tensor: rewards,
                                                                  self.actions_tensor: actions,
                                                                  self.dropout_rate_tensor: self.dropout_rate})
         else:
             l2_loss, loss, _, step_tf = self.sess.run([self.reduced_loss, self.loss, self.train_op, self.step_ph],
                                                       feed_dict={self.x_tensor: x,
                                                                  self.y_gt: y,
-                                                                 self.rewards_tensor: rewards,
                                                                  self.actions_tensor: actions})
         self.step = step_tf
         return l2_loss, loss, step_tf

@@ -172,9 +172,12 @@ class DQNEnvironment:
         return reward, death
 
     def write_video_worker(self):
+        suffix = ''
+        if self.frame_count <= self.replay_start_size:
+            suffix = '-random_input'
         if len(self.viz_out_buffer) > 0:
             video_out_fpath = self.video_out_fpath_prefix + str(self.video_start_train_step) + '-' \
-                              + str(self.video_end_train_step) + '.mp4'
+                              + str(self.video_end_train_step) + suffix + '.mp4'
             self.video_start_train_step = self.video_end_train_step + 1
             clip = ImageSequenceClip(self.viz_out_buffer, fps=self.viz_fps)
             clip.write_videofile(video_out_fpath, fps=self.viz_fps, verbose=False, logger=None)
@@ -182,6 +185,8 @@ class DQNEnvironment:
 
     def write_video(self):
         self.video_end_train_step = self.curr_train_step
+        if self.frame_count <= self.replay_start_size:
+            self.video_end_train_step = self.frame_count
         self.viz_out_buffer = [im.copy() for im in self.viz_frame_buffer]
         self.viz_frame_buffer = []
         video_writer_thread = Thread(target=self.write_video_worker)
@@ -356,6 +361,8 @@ class DQNEnvironment:
             if self.curr_episode_reward > self.best_episode_reward:
                 self.best_episode_reward = self.curr_episode_reward
             self.curr_episode_reward = 0.
+        if self.frame_count % 36000 == 0:  # 10 mins of video
+            self.write_video()
         return reward, death
 
     def sample_from_replay_memory(self):
@@ -411,7 +418,6 @@ class DQNEnvironment:
                          self.plot_losses, self.plot_l2_losses],
                         open(self.curr_loss_data_cache_fpath + suffix, 'wb'))
             self.write_video()
-            k = 0
 
 
 if __name__ == '__main__':

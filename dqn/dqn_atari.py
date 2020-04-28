@@ -25,6 +25,7 @@ from tqdm import tqdm
 import cv2
 from matplotlib import pyplot as plt
 from moviepy.editor import ImageSequenceClip
+from shove import Shove
 
 from nn import DQN
 
@@ -46,10 +47,9 @@ class DQNEnvironment:
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2,
                  sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000,
                  batch_size=32, viz=True, sync_freq=200, replay_start_size=100, viz_fps=60,
-                 episodic_reward_ema_alpha=.99, nn_input_cache_fname='nn_input', discount_factor=.99,
-                 replay_memory_cache_fname='replay_memory', rewards_data_cache_fname='rewards_history',
-                 loss_data_cache_fname='training_history', video_prefix='shm_dqn', run_dir_prefix='run',
-                 print_loss_every_n_steps=100, render=False, plot_stride=100):
+                 episodic_reward_ema_alpha=.99, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
+                 video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=100, render=False,
+                 plot_stride=100):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps
@@ -59,24 +59,23 @@ class DQNEnvironment:
         self.print_loss_every_n_steps = print_loss_every_n_steps
         self.env_out_dir = self.root_dir + os.sep + self.env_name
         self.first_run = True
+        self.experience_idx = 0
+        self.l2_loss = 0.
+        self.loss = 0.
         force_makedir(self.env_out_dir)
-        run_dirs = glob(self.env_out_dir + os.sep + '*')
+        run_dirs = glob(self.env_out_dir + os.sep + 'run-*')
         self.run_id = 0
         if len(run_dirs) > 0:
             run_indices = [int(s.split('-')[-1]) for s in run_dirs]
             self.run_id = max(run_indices) + 1
-        self.prev_env_out_dir = self.env_out_dir + os.sep + run_dir_prefix + '-' + str(self.run_id - 1)
+        self.cache_fpath = self.env_out_dir + os.sep + replay_memory_cache_fname
         self.curr_env_out_dir = self.env_out_dir + os.sep + run_dir_prefix + '-' + str(self.run_id)
         force_makedir(self.env_out_dir)
         self.curr_models_dir = self.curr_env_out_dir + os.sep + 'trained_models'
-        self.prev_models_dir = self.prev_env_out_dir + os.sep + 'trained_models'
         force_makedir(self.curr_models_dir)
-        self.curr_caches_dir = self.curr_env_out_dir + os.sep + 'caches'
-        self.prev_caches_dir = self.prev_env_out_dir + os.sep + 'caches'
-        force_makedir(self.curr_caches_dir)
         self.curr_plots_dir = self.curr_env_out_dir + os.sep + 'plots'
-        self.prev_plots_dir = self.prev_env_out_dir + os.sep + 'plots'
         force_makedir(self.curr_plots_dir)
+
         if viz:
             self.video_out_dir = self.curr_env_out_dir + os.sep + 'video_outs'
             force_makedir(self.video_out_dir)
@@ -86,26 +85,8 @@ class DQNEnvironment:
         self.sync_freq = sync_freq
         self.replay_start_size = replay_start_size
         self.replay_break_even_train_step = 0
-        
-        self.curr_nn_input_cache_fpath = self.curr_caches_dir + os.sep + nn_input_cache_fname
-        self.curr_replay_memory_cache_fpath = self.curr_caches_dir + os.sep + replay_memory_cache_fname
-        self.curr_rewards_data_cache_fpath = self.curr_caches_dir + os.sep + rewards_data_cache_fname
-        self.curr_loss_data_cache_fpath = self.curr_caches_dir + os.sep + loss_data_cache_fname
 
-        prev_suffix = ''
-        if os.path.isdir(self.prev_caches_dir):
-            prev_cache_fpaths = glob(self.prev_caches_dir + os.sep + replay_memory_cache_fname + '*')
-            if len(prev_cache_fpaths) > 0:
-                latest_id = max([int(p.split('-')[-1]) for p in prev_cache_fpaths])
-                prev_suffix = str(latest_id)
-
-        self.prev_nn_input_cache_fpath = self.prev_caches_dir + os.sep + nn_input_cache_fname + '-' + prev_suffix
-        self.prev_replay_memory_cache_fpath = self.prev_caches_dir + os.sep + replay_memory_cache_fname \
-                                              + '-' + prev_suffix
-        self.prev_rewards_data_cache_fpath = self.prev_caches_dir + os.sep + rewards_data_cache_fname \
-                                             + '-' + prev_suffix
-        self.prev_loss_data_cache_fpath = self.prev_caches_dir + os.sep + loss_data_cache_fname + '-' + prev_suffix
-        
+        self.replay_buffer_db = None
         self.video_out_fpath_prefix = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-'
         self.dqn_constant = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
                                 model_prefix=self.env_name)
@@ -137,6 +118,7 @@ class DQNEnvironment:
         self.clip = None
         self.isalive = True
         self.curr_action = self.env.action_space.sample()
+        self.random_action_taken = True
         self.viz = viz
         self.curr_episode_reward = 0.
         self.best_episode_reward = 0.
@@ -206,63 +188,79 @@ class DQNEnvironment:
         self.dqn_constant.init()
         self.dqn_action.init()
         self.dqn_action.load()
-        if not os.path.isfile(self.prev_nn_input_cache_fpath):
-            print(self.prev_nn_input_cache_fpath, 'not found, initializing first nn_input with random actions')
+        db_exists = False
+        if os.path.isfile(self.cache_fpath):
+            db_exists = True
+        self.replay_buffer_db = Shove('lite://' + self.cache_fpath)
+        self.experience_idx = len(list(self.replay_buffer_db.keys()))
+        if db_exists:
+            self.nn_input, self.curr_action, _, \
+            self.curr_train_step, self.frame_count = self.replay_buffer_db[self.experience_idx - 1]
+        else:
             for _ in range(self.history_size):
                 self.curr_action = self.env.action_space.sample()
                 self.perform_action(init_flag=True)
                 self.nn_input.append(self.curr_frame)
             self.nn_input = np.expand_dims(np.rollaxis(np.array(self.nn_input), 0, 3), 0)
-        else:
-            print(self.prev_nn_input_cache_fpath, 'found!, reading from it....')
-            self.nn_input = pickle.load(open(self.prev_nn_input_cache_fpath, 'rb'))
-        if not os.path.isfile(self.prev_replay_memory_cache_fpath):
-            print(self.prev_replay_memory_cache_fpath, 'not found, building new experience replay...')
             self.populate_experience()
-        else:
-            print(self.prev_replay_memory_cache_fpath, 'found!, reading from it...')
-            self.replay_buffer = pickle.load(open(self.prev_replay_memory_cache_fpath, 'rb'))
-        if os.path.isfile(self.prev_rewards_data_cache_fpath):
-            print(self.prev_rewards_data_cache_fpath, 'found!, reading from it...')
-            self.plot_frame_indices, self.curr_episode_rewards, \
-            self.best_episode_rewards, self.ema_episode_rewards = pickle.load(open(self.prev_rewards_data_cache_fpath,
-                                                                                   'rb'))
-            if len(self.plot_frame_indices) > 0:
-                self.frame_count = self.plot_frame_indices[-1]
-            if len(self.best_episode_rewards) > 0:
-                self.best_episode_reward = self.best_episode_rewards[-1]
-            if self.frame_count > self.replay_start_size:
-                self.print_train_start_text()
-        if os.path.isfile(self.prev_loss_data_cache_fpath):
-            print(self.prev_loss_data_cache_fpath, 'found!, reading from it...')
-            self.plot_loss_frame_counts, self.plot_loss_train_steps, \
-            self.plot_losses, self.plot_l2_losses = pickle.load(open(self.prev_loss_data_cache_fpath, 'rb'))
-            if len(self.plot_loss_train_steps) > 0:
-                self.curr_train_step = self.plot_loss_train_steps[-1]
+
+        # if not os.path.isfile(self.prev_nn_input_cache_fpath):
+        #     print(self.prev_nn_input_cache_fpath, 'not found, initializing first nn_input with random actions')
+        #     for _ in range(self.history_size):
+        #         self.curr_action = self.env.action_space.sample()
+        #         self.perform_action(init_flag=True)
+        #         self.nn_input.append(self.curr_frame)
+        #     self.nn_input = np.expand_dims(np.rollaxis(np.array(self.nn_input), 0, 3), 0)
+        # else:
+        #     print(self.prev_nn_input_cache_fpath, 'found!, reading from it....')
+        #     self.nn_input = pickle.load(open(self.prev_nn_input_cache_fpath, 'rb'))
+        # if not os.path.isfile(self.prev_replay_memory_cache_fpath):
+        #     print(self.prev_replay_memory_cache_fpath, 'not found, building new experience replay...')
+        #     self.populate_experience()
+        # else:
+        #     print(self.prev_replay_memory_cache_fpath, 'found!, reading from it...')
+        #     self.replay_buffer = pickle.load(open(self.prev_replay_memory_cache_fpath, 'rb'))
+        # if os.path.isfile(self.prev_rewards_data_cache_fpath):
+        #     print(self.prev_rewards_data_cache_fpath, 'found!, reading from it...')
+        #     self.plot_frame_indices, self.curr_episode_rewards, \
+        #     self.best_episode_rewards, self.ema_episode_rewards = pickle.load(open(self.prev_rewards_data_cache_fpath,
+        #                                                                            'rb'))
+        #     if len(self.plot_frame_indices) > 0:
+        #         self.frame_count = self.plot_frame_indices[-1]
+        #     if len(self.best_episode_rewards) > 0:
+        #         self.best_episode_reward = self.best_episode_rewards[-1]
+        #     if self.frame_count > self.replay_start_size:
+        #         self.print_train_start_text()
+        # if os.path.isfile(self.prev_loss_data_cache_fpath):
+        #     print(self.prev_loss_data_cache_fpath, 'found!, reading from it...')
+        #     self.plot_loss_frame_counts, self.plot_loss_train_steps, \
+        #     self.plot_losses, self.plot_l2_losses = pickle.load(open(self.prev_loss_data_cache_fpath, 'rb'))
+        #     if len(self.plot_loss_train_steps) > 0:
+        #         self.curr_train_step = self.plot_loss_train_steps[-1]
         self.sync_and_save_params(init_mode=True)
 
     def train_agent(self):
-        try:
-            print('Starting progress...')
-            if self.frame_count < self.replay_start_size:
-                print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
-            pbar = tqdm(total=self.num_train_steps)
-            pbar.update(self.curr_train_step)
-            while self.curr_train_step < self.num_train_steps:
-                if self.frame_count >= self.replay_start_size:
-                    self.train_step()
-                    pbar.update(1)
-                for i in range(self.sample_freq):
-                    self.perform_action()
-                self.populate_experience()
-                if self.frame_count >= self.replay_start_size:
-                    self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
-                    self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
-                if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
-                    self.sync_and_save_params()
-            self.die()
-        except:
-            self.die()
+        # try:
+        print('Starting progress...')
+        if self.frame_count < self.replay_start_size:
+            print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
+        pbar = tqdm(total=self.num_train_steps)
+        pbar.update(self.curr_train_step)
+        while self.curr_train_step < self.num_train_steps:
+            if self.frame_count >= self.replay_start_size:
+                self.train_step()
+                pbar.update(1)
+            for i in range(self.sample_freq):
+                self.perform_action()
+            self.populate_experience()
+            if self.frame_count >= self.replay_start_size:
+                self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
+                self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
+            if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
+                self.sync_and_save_params()
+        self.die()
+        # except:
+        #     self.die()
 
     def print_train_start_text(self):
         print('----+++------REACHED REPLAY BREAK-EVEN at frame', self.frame_count, '------+++----')
@@ -279,7 +277,7 @@ class DQNEnvironment:
             self.frame_writer_thread.join()
         print('Exiting....🏃')
 
-    def plot_stats(self):
+    def plot_stats(self):  # TODO: accustom this to use ShoveDB
         idx = np.linspace(0, len(self.plot_frame_indices) - 1,
                           len(self.plot_frame_indices) // self.plot_stride).astype(np.int)
         frame_indices = np.array(self.plot_frame_indices)[idx]
@@ -312,8 +310,10 @@ class DQNEnvironment:
     def populate_experience(self):
         if self.frame_count < self.replay_start_size or np.random.rand() < self.random_action_prob:
               action = self.env.action_space.sample()
+              self.random_action_taken = True
         else:
             action_pred, _, _ = self.dqn_action.infer(self.nn_input)
+            self.random_action_taken = False
             action = action_pred[0]
         self.curr_action = action
         nn_input = self.nn_input.copy()
@@ -322,11 +322,15 @@ class DQNEnvironment:
         max_qval = reward + self.discount_factor * action_qvals.max()
         if death:
             max_qval = reward
-        experience = [nn_input[0], action, max_qval]
-        if len(self.replay_buffer) == 0:
-            self.replay_buffer = [experience]
-        else:
-            self.replay_buffer.append(experience)
+        experience = [nn_input[0], action, max_qval, self.curr_train_step, self.frame_count,
+                      self.random_action_taken, self.total_episode_ema_reward, self.curr_episode_reward,
+                      self.best_episode_reward]
+        self.replay_buffer_db[self.experience_idx] = experience
+        # self.plot_loss_train_steps.append(self.curr_train_step)
+        # self.plot_frame_indices.append(self.frame_count)
+        # self.ema_episode_rewards.append(self.total_episode_ema_reward)
+        # self.curr_episode_rewards.append(self.curr_episode_reward)
+        # self.best_episode_rewards.append(self.best_episode_reward)
 
     def phi(self):
         ims = [self.prev_bgr_frame, self.curr_bgr_frame]
@@ -346,12 +350,8 @@ class DQNEnvironment:
             self.env.render()
         reward, death = self.rewards_preprocess(reward, info)
         self.curr_episode_reward += reward
-        self.plot_frame_indices.append(int(self.frame_count))
-        self.curr_episode_rewards.append(self.curr_episode_reward)
-        self.best_episode_rewards.append(self.best_episode_reward)
-        self.ema_episode_rewards.append(self.total_episode_ema_reward)
         self.frame_count += 1
-        if self.frame_count % 500 == 0:
+        if self.frame_count % self.print_loss_every_n_steps == 0:
             self.plot_stats()
         if self.viz:
             self.video_buffer.put([self.curr_bgr_frame.copy(), self.curr_train_step, self.frame_count,
@@ -398,15 +398,10 @@ class DQNEnvironment:
         if len(self.replay_buffer) > self.replay_buffer_size:
             self.replay_buffer = self.replay_buffer[-self.replay_buffer_size // 2:]
         nn_input, actions, y_targ = self.sample_from_replay_memory()
-        l2_loss, loss, step_tf = self.dqn_action.train_step(nn_input, y_targ, actions)
-        self.curr_train_step = step_tf
-        self.plot_loss_frame_counts.append(self.frame_count)
-        self.plot_loss_train_steps.append(self.curr_train_step)
-        self.plot_l2_losses.append(l2_loss)
-        self.plot_losses.append(loss)
+        self.l2_loss, self.loss, self.curr_train_step = self.dqn_action.train_step(nn_input, y_targ, actions)
         if self.curr_train_step % self.print_loss_every_n_steps == 0:
-            print('Step =', step_tf, ', Loss=', loss, ', L2 Loss=', loss, ', random_action_prob =',
-                  self.random_action_prob)
+            print('Step =', self.curr_train_step, ', Loss=', self.loss, ', L2 Loss=', self.l2_loss,
+                  ', random_action_prob =', self.random_action_prob)
             print('--> episodic_reward: EMA=', self.total_episode_ema_reward, ', BEST=', self.best_episode_reward,
                   ', CURRENT=', self.curr_episode_reward)
 
@@ -415,28 +410,28 @@ class DQNEnvironment:
         s = self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
         self.dqn_constant.load(s)
         if not init_mode:
-            suffix = '-' + str(self.curr_train_step)
-            suffix_prev = '-' + str(self.curr_train_step - self.sync_freq)
-
-            print('Writing', self.curr_nn_input_cache_fpath + suffix)
-            pickle.dump(self.nn_input, open(self.curr_nn_input_cache_fpath + suffix, 'wb'))
-            force_delete(self.curr_nn_input_cache_fpath + suffix_prev)
-
-            print('Writing', self.curr_replay_memory_cache_fpath + suffix)
-            pickle.dump(self.replay_buffer, open(self.curr_replay_memory_cache_fpath + suffix, 'wb'))
-            force_delete(self.curr_replay_memory_cache_fpath + suffix_prev)
-
-            print('Writing', self.curr_rewards_data_cache_fpath + suffix)
-            pickle.dump([self.plot_frame_indices, self.curr_episode_rewards,
-                         self.best_episode_rewards, self.ema_episode_rewards],
-                        open(self.curr_rewards_data_cache_fpath + suffix, 'wb'))
-            force_delete(self.curr_rewards_data_cache_fpath + suffix_prev)
-
-            print('Writing', self.curr_loss_data_cache_fpath + suffix)
-            pickle.dump([self.plot_loss_frame_counts, self.plot_loss_train_steps,
-                         self.plot_losses, self.plot_l2_losses],
-                        open(self.curr_loss_data_cache_fpath + suffix, 'wb'))
-            force_delete(self.curr_loss_data_cache_fpath + suffix_prev)
+            # suffix = '-' + str(self.curr_train_step)
+            # suffix_prev = '-' + str(self.curr_train_step - self.sync_freq)
+            #
+            # print('Writing', self.curr_nn_input_cache_fpath + suffix)
+            # pickle.dump(self.nn_input, open(self.curr_nn_input_cache_fpath + suffix, 'wb'))
+            # force_delete(self.curr_nn_input_cache_fpath + suffix_prev)
+            #
+            # print('Writing', self.curr_replay_memory_cache_fpath + suffix)
+            # pickle.dump(self.replay_buffer, open(self.curr_replay_memory_cache_fpath + suffix, 'wb'))
+            # force_delete(self.curr_replay_memory_cache_fpath + suffix_prev)
+            #
+            # print('Writing', self.curr_rewards_data_cache_fpath + suffix)
+            # pickle.dump([self.plot_frame_indices, self.curr_episode_rewards,
+            #              self.best_episode_rewards, self.ema_episode_rewards],
+            #             open(self.curr_rewards_data_cache_fpath + suffix, 'wb'))
+            # force_delete(self.curr_rewards_data_cache_fpath + suffix_prev)
+            #
+            # print('Writing', self.curr_loss_data_cache_fpath + suffix)
+            # pickle.dump([self.plot_loss_frame_counts, self.plot_loss_train_steps,
+            #              self.plot_losses, self.plot_l2_losses],
+            #             open(self.curr_loss_data_cache_fpath + suffix, 'wb'))
+            # force_delete(self.curr_loss_data_cache_fpath + suffix_prev)
             self.write_video()
 
 

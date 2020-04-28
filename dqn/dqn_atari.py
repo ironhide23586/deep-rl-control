@@ -31,7 +31,14 @@ from nn import DQN
 
 def force_makedir(dir):
     if not os.path.isdir(dir):
+        print('Making directory at', dir)
         os.makedirs(dir)
+
+
+def force_delete(fpath):
+    if os.path.isfile(fpath):
+        print('Deleting', fpath)
+        os.remove(fpath)
 
 
 class DQNEnvironment:
@@ -42,7 +49,7 @@ class DQNEnvironment:
                  episodic_reward_ema_alpha=.99, nn_input_cache_fname='nn_input', discount_factor=.99,
                  replay_memory_cache_fname='replay_memory', rewards_data_cache_fname='rewards_history',
                  loss_data_cache_fname='training_history', video_prefix='shm_dqn', run_dir_prefix='run',
-                 print_loss_every_n_steps=100, render=True, plot_stride=100):
+                 print_loss_every_n_steps=100, render=False, plot_stride=100):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps
@@ -87,9 +94,9 @@ class DQNEnvironment:
 
         prev_suffix = ''
         if os.path.isdir(self.prev_caches_dir):
-            prev_cache_nn_input_fpaths = glob(self.prev_caches_dir + os.sep + nn_input_cache_fname + '*')
-            if len(prev_cache_nn_input_fpaths) > 0:
-                latest_id = max([int(p.split('-')[-1]) for p in prev_cache_nn_input_fpaths])
+            prev_cache_fpaths = glob(self.prev_caches_dir + os.sep + replay_memory_cache_fname + '*')
+            if len(prev_cache_fpaths) > 0:
+                latest_id = max([int(p.split('-')[-1]) for p in prev_cache_fpaths])
                 prev_suffix = str(latest_id)
 
         self.prev_nn_input_cache_fpath = self.prev_caches_dir + os.sep + nn_input_cache_fname + '-' + prev_suffix
@@ -239,9 +246,12 @@ class DQNEnvironment:
             print('Starting progress...')
             if self.frame_count < self.replay_start_size:
                 print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
+            pbar = tqdm(total=self.num_train_steps)
+            pbar.update(self.curr_train_step)
             while self.curr_train_step < self.num_train_steps:
                 if self.frame_count >= self.replay_start_size:
                     self.train_step()
+                    pbar.update(1)
                 for i in range(self.sample_freq):
                     self.perform_action()
                 self.populate_experience()
@@ -322,7 +332,7 @@ class DQNEnvironment:
         ims = [self.prev_bgr_frame, self.curr_bgr_frame]
         x = np.max(ims, axis=0)
         x = cv2.cvtColor(x, cv2.COLOR_RGB2YUV)[:, :, 0]
-        x = cv2.resize(x, (84, 84))
+        x = cv2.resize(x, (84, 84), interpolation=cv2.INTER_NEAREST)
         self.curr_frame = x
 
     def perform_action(self, init_flag=False):
@@ -406,17 +416,27 @@ class DQNEnvironment:
         self.dqn_constant.load(s)
         if not init_mode:
             suffix = '-' + str(self.curr_train_step)
+            suffix_prev = '-' + str(self.curr_train_step - self.sync_freq)
+
             print('Writing', self.curr_nn_input_cache_fpath + suffix)
             pickle.dump(self.nn_input, open(self.curr_nn_input_cache_fpath + suffix, 'wb'))
+            force_delete(self.curr_nn_input_cache_fpath + suffix_prev)
+
             print('Writing', self.curr_replay_memory_cache_fpath + suffix)
             pickle.dump(self.replay_buffer, open(self.curr_replay_memory_cache_fpath + suffix, 'wb'))
+            force_delete(self.curr_replay_memory_cache_fpath + suffix_prev)
+
             print('Writing', self.curr_rewards_data_cache_fpath + suffix)
             pickle.dump([self.plot_frame_indices, self.curr_episode_rewards,
                          self.best_episode_rewards, self.ema_episode_rewards],
                         open(self.curr_rewards_data_cache_fpath + suffix, 'wb'))
+            force_delete(self.curr_rewards_data_cache_fpath + suffix_prev)
+
+            print('Writing', self.curr_loss_data_cache_fpath + suffix)
             pickle.dump([self.plot_loss_frame_counts, self.plot_loss_train_steps,
                          self.plot_losses, self.plot_l2_losses],
                         open(self.curr_loss_data_cache_fpath + suffix, 'wb'))
+            force_delete(self.curr_loss_data_cache_fpath + suffix_prev)
             self.write_video()
 
 

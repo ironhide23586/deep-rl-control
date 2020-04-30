@@ -45,8 +45,8 @@ def force_delete(fpath):
 class DQNEnvironment:
 
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2,
-                 sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000,
-                 batch_size=32, viz=True, sync_freq=200, replay_start_size=100, viz_fps=60,
+                 sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
+                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60,
                  episodic_reward_ema_alpha=.99, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
                  video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=100, render=False,
                  plot_stride=100):
@@ -101,13 +101,12 @@ class DQNEnvironment:
         self.replay_buffer_size = replay_buffer_size
         self.random_action_prob = 1.
         self.replay_buffer = []
-        self.nn_input = []
+        self.nn_input = np.zeros([1, self.dqn_action.im_h, self.dqn_action.im_w, self.history_size])
         self.plot_frame_indices = []
         self.curr_episode_rewards = []
         self.best_episode_rewards = []
         self.ema_episode_rewards = []
         self.plot_loss_train_steps = []
-        self.plot_loss_frame_counts = []
         self.plot_losses = []
         self.plot_l2_losses = []
         self.viz_frame_buffer = []
@@ -138,7 +137,11 @@ class DQNEnvironment:
                 time.sleep(1)
                 continue
             im, train_step, frame_count, curr_episode_reward, \
-            best_episode_reward, total_episode_ema_reward, random_action_prob = self.video_buffer.get()
+            best_episode_reward, total_episode_ema_reward, random_action_prob, \
+            random_action_taken, curr_action, loss, l2_loss = self.video_buffer.get()
+            dot_color = (0, 255, 0)
+            if random_action_taken:
+                dot_color = (0, 0, 255)
             cv2.putText(im, str(frame_count), (130, 10), cv2.FONT_HERSHEY_SIMPLEX, .3, (255, 255, 255))
             cv2.putText(im, str(train_step), (2, 10), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 0, 255))
             cv2.putText(im, 'EMA=' + str(round(total_episode_ema_reward, 3)), (50, 10), cv2.FONT_HERSHEY_SIMPLEX, .35,
@@ -149,6 +152,14 @@ class DQNEnvironment:
                         (0, 255, 0))
             cv2.putText(im, str(round(random_action_prob, 3)), (120, 180), cv2.FONT_HERSHEY_SIMPLEX, .35,
                         (255, 255, 255))
+            cv2.circle(im, (5, 100), 5, dot_color, -1)
+            cv2.putText(im, str(curr_action), (150, 100), cv2.FONT_HERSHEY_SIMPLEX, .35,
+                        (0, 255, 255))
+            cv2.putText(im, str(round(loss, 5)), (1, 110), cv2.FONT_HERSHEY_SIMPLEX, .2,
+                        (255, 255, 255))
+            cv2.putText(im, str(round(l2_loss, 5)), (1, 118), cv2.FONT_HERSHEY_SIMPLEX, .2,
+                        (200, 200, 200))
+
             self.viz_frame_buffer.append(im)
 
     def rewards_preprocess(self, reward, info):
@@ -167,9 +178,10 @@ class DQNEnvironment:
         if len(self.viz_out_buffer) > 0:
             video_out_fpath = self.video_out_fpath_prefix + str(self.video_start_train_step) + '-' \
                               + str(self.video_end_train_step) + suffix + '.mp4'
+            print('Writing video to', video_out_fpath)
             self.video_start_train_step = self.video_end_train_step + 1
             clip = ImageSequenceClip(self.viz_out_buffer, fps=self.viz_fps)
-            clip.write_videofile(video_out_fpath, fps=self.viz_fps, verbose=False, logger=None)
+            clip.write_videofile(video_out_fpath, fps=self.viz_fps)  #, verbose=False, logger=None)
             self.viz_out_buffer = []
 
     def write_video(self):
@@ -180,6 +192,7 @@ class DQNEnvironment:
         self.viz_frame_buffer = []
         video_writer_thread = Thread(target=self.write_video_worker)
         video_writer_thread.start()
+        video_writer_thread.join()
 
     def init(self):
         self.curr_bgr_frame = self.env.reset()
@@ -188,79 +201,46 @@ class DQNEnvironment:
         self.dqn_constant.init()
         self.dqn_action.init()
         self.dqn_action.load()
+        self.curr_train_step = self.dqn_action.step
         db_exists = False
         if os.path.isfile(self.cache_fpath):
             db_exists = True
         self.replay_buffer_db = Shove('lite://' + self.cache_fpath)
         self.experience_idx = len(list(self.replay_buffer_db.keys()))
-        if db_exists:
-            self.nn_input, self.curr_action, _, \
-            self.curr_train_step, self.frame_count = self.replay_buffer_db[self.experience_idx - 1]
-        else:
-            for _ in range(self.history_size):
-                self.curr_action = self.env.action_space.sample()
-                self.perform_action(init_flag=True)
-                self.nn_input.append(self.curr_frame)
-            self.nn_input = np.expand_dims(np.rollaxis(np.array(self.nn_input), 0, 3), 0)
+        if db_exists and self.experience_idx > 0:
+            _, _, _, train_step_data = self.sample_from_replay_memory(random=False, chunk_size=1)
+            cached_train_step, self.frame_count, self.total_episode_ema_reward, \
+            self.curr_episode_reward, self.best_episode_reward = train_step_data
+        for _ in range(self.history_size):
+            self.curr_action = self.env.action_space.sample()
+            self.random_action_taken = True
+            self.perform_action()
+        if not db_exists or self.experience_idx <= 0:
             self.populate_experience()
-
-        # if not os.path.isfile(self.prev_nn_input_cache_fpath):
-        #     print(self.prev_nn_input_cache_fpath, 'not found, initializing first nn_input with random actions')
-        #     for _ in range(self.history_size):
-        #         self.curr_action = self.env.action_space.sample()
-        #         self.perform_action(init_flag=True)
-        #         self.nn_input.append(self.curr_frame)
-        #     self.nn_input = np.expand_dims(np.rollaxis(np.array(self.nn_input), 0, 3), 0)
-        # else:
-        #     print(self.prev_nn_input_cache_fpath, 'found!, reading from it....')
-        #     self.nn_input = pickle.load(open(self.prev_nn_input_cache_fpath, 'rb'))
-        # if not os.path.isfile(self.prev_replay_memory_cache_fpath):
-        #     print(self.prev_replay_memory_cache_fpath, 'not found, building new experience replay...')
-        #     self.populate_experience()
-        # else:
-        #     print(self.prev_replay_memory_cache_fpath, 'found!, reading from it...')
-        #     self.replay_buffer = pickle.load(open(self.prev_replay_memory_cache_fpath, 'rb'))
-        # if os.path.isfile(self.prev_rewards_data_cache_fpath):
-        #     print(self.prev_rewards_data_cache_fpath, 'found!, reading from it...')
-        #     self.plot_frame_indices, self.curr_episode_rewards, \
-        #     self.best_episode_rewards, self.ema_episode_rewards = pickle.load(open(self.prev_rewards_data_cache_fpath,
-        #                                                                            'rb'))
-        #     if len(self.plot_frame_indices) > 0:
-        #         self.frame_count = self.plot_frame_indices[-1]
-        #     if len(self.best_episode_rewards) > 0:
-        #         self.best_episode_reward = self.best_episode_rewards[-1]
-        #     if self.frame_count > self.replay_start_size:
-        #         self.print_train_start_text()
-        # if os.path.isfile(self.prev_loss_data_cache_fpath):
-        #     print(self.prev_loss_data_cache_fpath, 'found!, reading from it...')
-        #     self.plot_loss_frame_counts, self.plot_loss_train_steps, \
-        #     self.plot_losses, self.plot_l2_losses = pickle.load(open(self.prev_loss_data_cache_fpath, 'rb'))
-        #     if len(self.plot_loss_train_steps) > 0:
-        #         self.curr_train_step = self.plot_loss_train_steps[-1]
-        self.sync_and_save_params(init_mode=True)
+            self.sync_and_save_params(init_mode=True)
 
     def train_agent(self):
-        # try:
-        print('Starting progress...')
-        if self.frame_count < self.replay_start_size:
-            print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
-        pbar = tqdm(total=self.num_train_steps)
-        pbar.update(self.curr_train_step)
-        while self.curr_train_step < self.num_train_steps:
-            if self.frame_count >= self.replay_start_size:
-                self.train_step()
-                pbar.update(1)
-            for i in range(self.sample_freq):
-                self.perform_action()
-            self.populate_experience()
-            if self.frame_count >= self.replay_start_size:
-                self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
-                self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
-            if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
-                self.sync_and_save_params()
-        self.die()
-        # except:
-        #     self.die()
+        try:
+            print('Starting progress...')
+            if self.frame_count < self.replay_start_size:
+                print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
+            pbar = tqdm(total=self.num_train_steps)
+            pbar.update(self.curr_train_step)
+            while self.curr_train_step < self.num_train_steps:
+                if self.frame_count >= self.replay_start_size:
+                    self.train_step()
+                    pbar.update(1)
+                for i in range(self.sample_freq):
+                    self.perform_action()
+                self.populate_experience()
+                if self.frame_count >= self.replay_start_size:
+                    self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
+                    self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
+                if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
+                    self.sync_and_save_params()
+            self.die()
+        except:
+            self.die()
 
     def print_train_start_text(self):
         print('----+++------REACHED REPLAY BREAK-EVEN at frame', self.frame_count, '------+++----')
@@ -326,11 +306,11 @@ class DQNEnvironment:
                       self.random_action_taken, self.total_episode_ema_reward, self.curr_episode_reward,
                       self.best_episode_reward]
         self.replay_buffer_db[self.experience_idx] = experience
-        # self.plot_loss_train_steps.append(self.curr_train_step)
-        # self.plot_frame_indices.append(self.frame_count)
-        # self.ema_episode_rewards.append(self.total_episode_ema_reward)
-        # self.curr_episode_rewards.append(self.curr_episode_reward)
-        # self.best_episode_rewards.append(self.best_episode_reward)
+        self.experience_idx += 1
+        self.plot_frame_indices.append(self.frame_count)
+        self.curr_episode_rewards.append(self.curr_episode_reward)
+        self.best_episode_rewards.append(self.best_episode_reward)
+        self.ema_episode_rewards.append(self.total_episode_ema_reward)
 
     def phi(self):
         ims = [self.prev_bgr_frame, self.curr_bgr_frame]
@@ -356,7 +336,8 @@ class DQNEnvironment:
         if self.viz:
             self.video_buffer.put([self.curr_bgr_frame.copy(), self.curr_train_step, self.frame_count,
                                    self.curr_episode_reward, self.best_episode_reward, self.total_episode_ema_reward,
-                                   self.random_action_prob])
+                                   self.random_action_prob, self.random_action_taken, self.curr_action,
+                                   self.loss, self.l2_loss])
         if self.frame_count == self.replay_start_size:
             self.replay_break_even_train_step = self.curr_train_step
             self.print_train_start_text()
@@ -375,30 +356,56 @@ class DQNEnvironment:
             self.write_video()
         return reward, death
 
-    def sample_from_replay_memory(self):
-        idx = (np.random.sample([min(len(self.replay_buffer), self.batch_size)])
-               * len(self.replay_buffer)).astype(np.int)
+    def sample_from_replay_memory(self, random=True, chunk_size=None):
+        if chunk_size is None:
+            chunk_size = self.batch_size
+        if random:
+            idx = (np.random.sample([min(len(self.replay_buffer_db.keys()), chunk_size)])
+                   * len(self.replay_buffer_db.keys())).astype(np.int)
+        else:
+            start_idx = max(0, len(self.replay_buffer_db.keys()) - chunk_size)
+            end_idx = min(start_idx + chunk_size, len(self.replay_buffer_db.keys()))
+            idx = np.arange(start_idx, end_idx)
         nn_inputs = []
         actions = []
-        rewards = []
-        y_targs = []
+        max_qvals = []
+        train_steps = []
+        frame_counts = []
+        ema_rs = []
+        curr_rs = []
+        best_rs = []
         for i in idx:
-            nn_input, action, reward, y_targ = self.replay_buffer[i]
+            nn_input, action, max_qval, train_step, frame_count, random_action_taken, ema_r, \
+            curr_r, best_r = self.replay_buffer_db[int(i)]
             nn_inputs.append(nn_input)
             actions.append(action)
-            rewards.append(reward)
-            y_targs.append(y_targ)
+            max_qvals.append(max_qval)
+            train_steps.append(train_step)
+            frame_counts.append(frame_count)
+            ema_rs.append(ema_r)
+            curr_rs.append(curr_r)
+            best_rs.append(best_r)
         nn_inputs = np.array(nn_inputs)
         actions = np.array(actions)
-        rewards = np.array(rewards)
-        y_targs = np.array(y_targs)
-        return nn_inputs, actions, rewards, y_targs
+        max_qvals = np.array(max_qvals)
+
+        i = np.argmax(train_steps)
+        ts = train_steps[i]
+        fc = frame_counts[i]
+        er = ema_rs[i]
+        cr = curr_rs[i]
+        br = best_rs[i]
+
+        train_data = [ts, fc, er, cr, br]  # [train_step, frame_count, ema_reward, curr_reward, best_reward]
+
+        return nn_inputs, actions, max_qvals, train_data
 
     def train_step(self):
-        if len(self.replay_buffer) > self.replay_buffer_size:
-            self.replay_buffer = self.replay_buffer[-self.replay_buffer_size // 2:]
-        nn_input, actions, y_targ = self.sample_from_replay_memory()
+        nn_input, actions, y_targ, _ = self.sample_from_replay_memory(random=True, chunk_size=self.batch_size)
         self.l2_loss, self.loss, self.curr_train_step = self.dqn_action.train_step(nn_input, y_targ, actions)
+        self.plot_loss_train_steps.append(self.curr_train_step)
+        self.plot_losses.append(self.loss)
+        self.plot_l2_losses.append(self.l2_loss)
         if self.curr_train_step % self.print_loss_every_n_steps == 0:
             print('Step =', self.curr_train_step, ', Loss=', self.loss, ', L2 Loss=', self.l2_loss,
                   ', random_action_prob =', self.random_action_prob)
@@ -410,28 +417,6 @@ class DQNEnvironment:
         s = self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
         self.dqn_constant.load(s)
         if not init_mode:
-            # suffix = '-' + str(self.curr_train_step)
-            # suffix_prev = '-' + str(self.curr_train_step - self.sync_freq)
-            #
-            # print('Writing', self.curr_nn_input_cache_fpath + suffix)
-            # pickle.dump(self.nn_input, open(self.curr_nn_input_cache_fpath + suffix, 'wb'))
-            # force_delete(self.curr_nn_input_cache_fpath + suffix_prev)
-            #
-            # print('Writing', self.curr_replay_memory_cache_fpath + suffix)
-            # pickle.dump(self.replay_buffer, open(self.curr_replay_memory_cache_fpath + suffix, 'wb'))
-            # force_delete(self.curr_replay_memory_cache_fpath + suffix_prev)
-            #
-            # print('Writing', self.curr_rewards_data_cache_fpath + suffix)
-            # pickle.dump([self.plot_frame_indices, self.curr_episode_rewards,
-            #              self.best_episode_rewards, self.ema_episode_rewards],
-            #             open(self.curr_rewards_data_cache_fpath + suffix, 'wb'))
-            # force_delete(self.curr_rewards_data_cache_fpath + suffix_prev)
-            #
-            # print('Writing', self.curr_loss_data_cache_fpath + suffix)
-            # pickle.dump([self.plot_loss_frame_counts, self.plot_loss_train_steps,
-            #              self.plot_losses, self.plot_l2_losses],
-            #             open(self.curr_loss_data_cache_fpath + suffix, 'wb'))
-            # force_delete(self.curr_loss_data_cache_fpath + suffix_prev)
             self.write_video()
 
 

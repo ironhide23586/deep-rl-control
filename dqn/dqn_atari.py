@@ -47,8 +47,8 @@ class DQNEnvironment:
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2,
                  sample_freq=4, replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
                  batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60,
-                 episodic_reward_ema_alpha=.99, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
-                 video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=100, render=False,
+                 episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
+                 video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,
                  plot_stride=100):
         self.env_name = env_name
         self.root_dir = root_dir
@@ -296,13 +296,14 @@ class DQNEnvironment:
             self.random_action_taken = False
             action = action_pred[0]
         self.curr_action = action
-        nn_input = self.nn_input.copy()
+        nn_input_prev = self.nn_input.copy()
         reward, death = self.perform_action()
-        actions_targ, action_probs, action_qvals = self.dqn_constant.infer(self.nn_input)
-        max_qval = reward + self.discount_factor * action_qvals.max()
-        if death:
-            max_qval = reward
-        experience = [nn_input[0], action, max_qval, self.curr_train_step, self.frame_count,
+        nn_input_new = self.nn_input.copy()
+        # actions_targ, action_probs, action_qvals = self.dqn_constant.infer(self.nn_input)
+        # max_qval = reward + self.discount_factor * action_qvals.max()  # TODO: URGENT - Store next state instead of qvals
+        # if death:
+        #     max_qval = reward
+        experience = [nn_input_prev[0], action, nn_input_new[0], reward, death, self.curr_train_step, self.frame_count,
                       self.random_action_taken, self.total_episode_ema_reward, self.curr_episode_reward,
                       self.best_episode_reward]
         self.replay_buffer_db[self.experience_idx] = experience
@@ -347,8 +348,9 @@ class DQNEnvironment:
         if done or self.num_lives <= 0:
             self.curr_bgr_frame = self.env.reset()
             self.first_run = True
-            self.total_episode_ema_reward = self.total_episode_ema_reward + (self.episodic_reward_ema_alpha
-                                              * (self.curr_episode_reward - self.total_episode_ema_reward))
+            self.total_episode_ema_reward = (1 - self.episodic_reward_ema_alpha) * self.total_episode_ema_reward + \
+                                            self.episodic_reward_ema_alpha * (self.curr_episode_reward -
+                                                                              self.total_episode_ema_reward)
             if self.curr_episode_reward > self.best_episode_reward:
                 self.best_episode_reward = self.curr_episode_reward
             self.curr_episode_reward = 0.
@@ -366,28 +368,33 @@ class DQNEnvironment:
             start_idx = max(0, len(self.replay_buffer_db.keys()) - chunk_size)
             end_idx = min(start_idx + chunk_size, len(self.replay_buffer_db.keys()))
             idx = np.arange(start_idx, end_idx)
-        nn_inputs = []
+        nn_inputs_prev = []
         actions = []
-        max_qvals = []
+        y_targs = []
         train_steps = []
         frame_counts = []
         ema_rs = []
         curr_rs = []
         best_rs = []
         for i in idx:
-            nn_input, action, max_qval, train_step, frame_count, random_action_taken, ema_r, \
-            curr_r, best_r = self.replay_buffer_db[int(i)]
-            nn_inputs.append(nn_input)
+            nn_input_prev, action, nn_input_new, reward, death, train_step, frame_count, random_action_taken,\
+            ema_r, curr_r, best_r = self.replay_buffer_db[int(i)]
+            actions_targ, action_probs, action_qvals = self.dqn_constant.infer(np.expand_dims(nn_input_new, 0))
+            max_qval = reward + self.discount_factor * action_qvals.max()
+            if death:
+                max_qval = reward
+            nn_inputs_prev.append(nn_input_prev)
             actions.append(action)
-            max_qvals.append(max_qval)
+            y_targs.append(max_qval)
+
             train_steps.append(train_step)
             frame_counts.append(frame_count)
             ema_rs.append(ema_r)
             curr_rs.append(curr_r)
             best_rs.append(best_r)
-        nn_inputs = np.array(nn_inputs)
+
+        nn_inputs_prev = np.array(nn_inputs_prev)
         actions = np.array(actions)
-        max_qvals = np.array(max_qvals)
 
         i = np.argmax(train_steps)
         ts = train_steps[i]
@@ -398,11 +405,12 @@ class DQNEnvironment:
 
         train_data = [ts, fc, er, cr, br]  # [train_step, frame_count, ema_reward, curr_reward, best_reward]
 
-        return nn_inputs, actions, max_qvals, train_data
+        return nn_inputs_prev, actions, y_targs, train_data
 
     def train_step(self):
-        nn_input, actions, y_targ, _ = self.sample_from_replay_memory(random=True, chunk_size=self.batch_size)
-        self.l2_loss, self.loss, self.curr_train_step = self.dqn_action.train_step(nn_input, y_targ, actions)
+        # sample method also obtains new q vals by running dqn_constant on it
+        nn_input, actions, y_targs, _ = self.sample_from_replay_memory(random=True, chunk_size=self.batch_size)
+        self.l2_loss, self.loss, self.curr_train_step = self.dqn_action.train_step(nn_input, y_targs, actions)
         self.plot_loss_train_steps.append(self.curr_train_step)
         self.plot_losses.append(self.loss)
         self.plot_l2_losses.append(self.l2_loss)

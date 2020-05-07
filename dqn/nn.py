@@ -75,9 +75,7 @@ class DQN:
 
         self.stop_grad_vars, self.stop_grad_update_ops = stop_grad_vars_and_ops
 
-        self.actions_mask_pred = tf.one_hot(self.actions_tensor, self.num_classes)
-        y_pred_rewards_mask = self.y_pred * self.actions_mask_pred
-        self.q_pred = tf.reduce_max(y_pred_rewards_mask, axis=1) + tf.reduce_min(y_pred_rewards_mask, axis=1)
+        self.q_pred = tf.reduce_sum(self.y_pred * tf.one_hot(self.actions_tensor, self.num_classes), axis=1)
 
         self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.q_pred, self.y_gt))
 
@@ -86,7 +84,7 @@ class DQN:
         self.reduced_loss = self.loss + tf.add_n(l2_losses)
         self.grads_tensor = None
         self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, momentum=.95)
-        self.train_op = self.opt.minimize(self.reduced_loss, global_step=self.step_ph, var_list=self.trainable_vars,
+        self.train_op = self.opt.minimize(self.loss, global_step=self.step_ph, var_list=self.trainable_vars,
                                           grad_loss=self.grads_tensor, name='rmsprop_train_op')
 
         self.vars_to_keep = [v for v in tf.global_variables() if v not in self.unsaved_vars]
@@ -278,21 +276,14 @@ class DQN:
         layer_outs = self.conv_block(layer_outs, 64, kernel_size=3, kernel_stride=1,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
 
-        stop_grad_vars_and_ops = self.__get_nn_vars_and_ops()
         shp = layer_outs.shape
         flat_len = shp[1] * shp[2] * shp[3]
-        # layer_outs = tf.transpose(layer_outs, [3, 1, 2, 0])
 
-        v0 = tf.all_variables()
-        layer_outs = self.dense_block(tf.reshape(layer_outs, [-1, flat_len]), 512)
+        layer_outs = self.dense_block(tf.reshape(layer_outs, [-1, flat_len]), 512, activation=tf.nn.relu)
         layer_outs = self.dense_block(layer_outs, self.num_classes, activation=None)
         layer_outs = tf.identity(layer_outs, name='qval_pred')
 
-        v1 = tf.all_variables()
-        # restore_excluded_vars = [v for v in v1 if v not in v0]
         restore_excluded_vars = []
-
-        # trainable_vars = [v for v in tf.trainable_variables() if v not in stop_grad_vars_and_ops[0]]
 
         stop_grad_vars_and_ops = [[], []]
         trainable_vars = tf.trainable_variables()

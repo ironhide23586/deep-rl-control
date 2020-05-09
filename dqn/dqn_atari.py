@@ -44,11 +44,11 @@ def force_delete(fpath):
 class DQNEnvironment:
 
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
-                 replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
+                 replay_buffer_size=1000000, history_size=4, num_train_steps=100000,
                  batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=100,
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
                  video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,
-                 max_replay_buffer_inmemory_size=50000, experience_db_sample_frac=.5,
+                 max_replay_buffer_inmemory_size=20000, experience_db_sample_frac=.5,
                  refresh_replay_cache_every_n_experiences=900, write_video_every_n_frames=36000):
         self.env_name = env_name
         self.root_dir = root_dir
@@ -58,6 +58,7 @@ class DQNEnvironment:
         self.refresh_replay_cache_every_n_experiences = refresh_replay_cache_every_n_experiences
         self.max_replay_buffer_inmemory_size = max_replay_buffer_inmemory_size
         self.num_db_sampled_experiences = 0
+        self.num_train_steps = num_train_steps
         self.experience_db_sample_frac = experience_db_sample_frac
         self.n_db_sample = int(self.experience_db_sample_frac * self.max_replay_buffer_inmemory_size)
         self.render = render
@@ -94,15 +95,14 @@ class DQNEnvironment:
 
         self.video_out_fpath_prefix = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-'
         self.dqn_constant = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
-                                model_prefix=self.env_name)
+                                model_prefix=self.env_name, num_train_steps=self.num_train_steps)
         self.dqn_action = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
-                              model_prefix=self.env_name)
+                              model_prefix=self.env_name, num_train_steps=self.num_train_steps)
         self.frame_count = 0
         self.curr_train_step = 0
         self.flicker_buffer_size = flicker_buffer_size
         self.history_size = history_size
         self.sample_freq = sample_freq
-        self.num_train_steps = num_train_steps
         self.replay_buffer_size = replay_buffer_size
         self.random_action_prob = 1.
         self.replay_buffer_inmemory = []
@@ -227,13 +227,15 @@ class DQNEnvironment:
             for dbk in db_keys:
                 _, _, _, _, _, train_step, frame_count, _, total_episode_ema_reward, curr_episode_reward, \
                 best_episode_reward, loss, l2_loss = self.replay_buffer_db[dbk]
-                self.plot_frame_indices.append(frame_count)
-                self.curr_episode_rewards.append(curr_episode_reward)
-                self.best_episode_rewards.append(best_episode_reward)
-                self.ema_episode_rewards.append(total_episode_ema_reward)
-                self.plot_loss_train_steps.append(train_step)
-                self.plot_losses.append(loss)
-                self.plot_l2_losses.append(l2_loss)
+                if frame_count < self.frame_count:
+                    self.plot_frame_indices.append(frame_count)
+                    self.curr_episode_rewards.append(curr_episode_reward)
+                    self.best_episode_rewards.append(best_episode_reward)
+                    self.ema_episode_rewards.append(total_episode_ema_reward)
+                    if frame_count > self.replay_start_size and train_step <= self.curr_train_step:
+                        self.plot_loss_train_steps.append(train_step)
+                        self.plot_losses.append(loss)
+                        self.plot_l2_losses.append(l2_loss)
 
             if self.frame_count >= self.replay_start_size:
                 self.random_exploration_active = False
@@ -324,10 +326,9 @@ class DQNEnvironment:
                           np.clip(self.num_plot_points, None,
                                   len(self.plot_loss_train_steps)).astype(np.int)).astype(np.int)
         loss_indices = np.array(self.plot_loss_train_steps)[idx]
-        losses = np.clip(np.array(self.plot_losses)[idx], None, 1e-5)
-        # l2_losses = np.clip(np.array(self.plot_l2_losses)[idx], None, .1)
+        losses = np.array(self.plot_losses)[idx]
+        losses = np.clip(losses, None, .0007)
         plt.plot(loss_indices, losses, '-', label='Loss')
-        # plt.plot(loss_indices, l2_losses, '-', label='L2 Loss')
         plt.legend(loc='best')
         plt.xlabel('Train Step')
         plt.ylabel('MSE Loss')
@@ -383,14 +384,17 @@ class DQNEnvironment:
         if refresh_inememory_experiences:
             self.replay_buffer_inmemory = []
             db_experience_indices = list(map(int, list(self.replay_buffer_db.keys())))
-            self.num_db_sampled_experiences = min(len(db_experience_indices), self.n_db_sample)
-            print('Sampling random', self.num_db_sampled_experiences, 'experiences from', len(db_experience_indices),
+            num_db_sampled_experiences = min(len(db_experience_indices), self.n_db_sample)
+            print('Sampling random', num_db_sampled_experiences, 'experiences from', len(db_experience_indices),
                   'experiences stored on disk and loading them to memory...')
             selected_db_indices = sorted(map(int, np.random.choice(db_experience_indices,
-                                                                   self.num_db_sampled_experiences, replace=False)))
+                                                                   num_db_sampled_experiences, replace=False)))
             for i in tqdm(range(len(selected_db_indices)), position=0, leave=True):
                 experience = [selected_db_indices[i]] + self.replay_buffer_db[str(selected_db_indices[i])]
-                self.replay_buffer_inmemory.append(experience)
+                if experience[7] <= self.frame_count:
+                    self.replay_buffer_inmemory.append(experience)
+            self.num_db_sampled_experiences = len(self.replay_buffer_inmemory)
+            print('Sampled', self.num_db_sampled_experiences, 'experiences from DB')
         self.replay_buffer_db.close()
         if save_model and not self.random_exploration_active:
             self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))

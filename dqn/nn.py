@@ -23,9 +23,9 @@ import cv2
 class DQN:
 
     def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
-                 learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_steps=1000000, dropout_rate=.3, discount_factor=.99,
-                 update_batchnorm_means_vars=True, optimized_inference=False, load_training_vars=True,
-                 model_folder=None, model_prefix='model'):
+                 learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
+                 discount_factor=.99, update_batchnorm_means_vars=True, optimized_inference=False,
+                 load_training_vars=True, model_folder=None, model_prefix='model'):
         if model_folder is None:
             self.model_folder = 'all_trained_models/trained_models'
         else:
@@ -37,6 +37,7 @@ class DQN:
         self.num_classes = num_classes
         self.im_h = im_h
         self.im_w = im_w
+        self.num_train_steps = num_train_steps
         self.compute_bn_mean_var = compute_bn_mean_var
         self.optimized_inference = optimized_inference
         self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, 4],
@@ -78,12 +79,14 @@ class DQN:
 
         self.q_pred = tf.reduce_sum(self.y_pred * tf.one_hot(self.actions_tensor, self.num_classes), axis=1)
 
-        self.loss_op = tf.reduce_mean(tf.math.squared_difference(self.q_pred, self.y_gt))
+        self.loss_op = tf.math.squared_difference(self.q_pred, self.y_gt)
+        self.learn_rate_tf = tf.train.polynomial_decay(self.learn_rate_tf, global_step=self.step_ph,
+                                                       decay_steps=self.num_train_steps, end_learning_rate=1e-6)
 
         l2_losses = [self.l2_regularizer_coeff * tf.nn.l2_loss(v) for v in self.trainable_vars]
         self.loss = tf.reduce_mean(self.loss_op)
         self.reduced_loss = self.loss + tf.add_n(l2_losses)
-        self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, momentum=.95)
+        self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, decay=.95)
         self.grads_and_vars_tensor = self.opt.compute_gradients(self.loss, var_list=self.trainable_vars)
         self.grads_tensor = [gv[0] for gv in self.grads_and_vars_tensor if gv[0] is not None]
         self.train_op = self.opt.apply_gradients(self.grads_and_vars_tensor, global_step=self.step_ph,
@@ -214,12 +217,16 @@ class DQN:
                                                                  self.actions_tensor: actions,
                                                                  self.dropout_rate_tensor: self.dropout_rate})
         else:
-            l2_loss, loss, _, step_tf, grads, q_pred = self.sess.run([self.reduced_loss, self.loss, self.train_op,
-                                                                      self.step_ph, self.grads_tensor, self.q_pred],
-                                                             feed_dict={self.x_tensor: x,
-                                                                        self.y_gt: y,
-                                                                        self.actions_tensor: actions})
-        self.step = step_tf
+            l2_loss, loss, _, step_tf, \
+            grads, q_pred, lr = self.sess.run([self.reduced_loss, self.loss, self.train_op,
+                                               self.step_ph, self.grads_tensor, self.q_pred,
+                                               self.learn_rate_tf],
+                                              feed_dict={self.x_tensor: x,
+                                                         self.y_gt: y,
+                                                         self.actions_tensor: actions})
+        loss_np = np.mean(np.square(np.array(y) - np.array(q_pred)))
+        gm = np.mean([np.abs(g).mean() for g in grads])
+        self.step = step_tf  # Gradients vanishing before train step 221
         return l2_loss, loss, step_tf
 
     def conv_block(self, x_in, output_filters, kernel_size=3, kernel_stride=1, dilation=1, padding="VALID",

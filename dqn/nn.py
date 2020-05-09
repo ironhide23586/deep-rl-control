@@ -152,7 +152,7 @@ class DQN:
                                                              self.dropout_rate_tensor: 0.})
         else:
             outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im})
-        return outs  # TODO: somehting wrong with final conv layer output; convolution outputting all zeros
+        return outs
 
     def center_crop(self, x):
         h, w, _ = x.shape

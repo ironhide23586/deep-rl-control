@@ -43,6 +43,7 @@ class DQN:
                                        name='input_x_tensor')
         self.actions_tensor = tf.placeholder(tf.int32, shape=[None], name='actions_tensor')
         self.layers = [self.x_tensor]
+        self.param_tensors_layerwise = [[]]
 
         self.start_step = start_step
         self.step = start_step
@@ -56,7 +57,7 @@ class DQN:
         self.sess = None
         if self.optimized_inference:
             self.dropout_enabled = False
-            self.y_pred, _, _, _ = self.init_nn_graph()
+            self.y_pred, _, _ = self.init_nn_graph()
             self.outs_softmax_op = tf.nn.softmax(self.y_pred)
             self.outs_final = tf.argmax(self.outs_softmax_op, axis=-1), self.outs_softmax_op, self.y_pred
             self.vars_to_keep = [v for v in tf.global_variables() if v not in self.unsaved_vars]
@@ -68,7 +69,7 @@ class DQN:
         if self.dropout_enabled:
             self.dropout_rate = dropout_rate
             self.dropout_rate_tensor = tf.placeholder(tf.float32, shape=())
-        self.y_pred, self.trainable_vars, self.restore_excluded_vars, stop_grad_vars_and_ops = self.init_nn_graph()
+        self.y_pred, self.trainable_vars, stop_grad_vars_and_ops = self.init_nn_graph()
         self.outs_softmax_op = tf.nn.softmax(self.y_pred)
         self.actions = tf.argmax(self.y_pred, axis=-1)
         self.outs_final = self.actions, self.outs_softmax_op, self.y_pred
@@ -86,12 +87,8 @@ class DQN:
         self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, momentum=.95)
         self.train_op = self.opt.minimize(self.loss, global_step=self.step_ph, var_list=self.trainable_vars,
                                           grad_loss=self.grads_tensor, name='rmsprop_train_op')
-
-        self.vars_to_keep = [v for v in tf.global_variables() if v not in self.unsaved_vars]
-        self.vars_to_restore = [v for v in self.vars_to_keep if v not in self.restore_excluded_vars]
-
-        self.saver = tf.train.Saver(max_to_keep=0, var_list=self.vars_to_keep)
-        self.restorer = tf.train.Saver(var_list=self.vars_to_restore)
+        self.saver = tf.train.Saver(max_to_keep=0)
+        self.restorer = tf.train.Saver()
 
     def init(self):
         if not self.sess:
@@ -184,9 +181,29 @@ class DQN:
             for i in range(a.shape[-1]):
                 cv2.imwrite('misc/' + prefix + str(b) + '-' + str(i) + '.png', a[:, :, i])
 
+    def viz_layer_outs(self, layer_tensor, input_tensor):
+        raw_outs = self.sess.run(layer_tensor, feed_dict={self.x_tensor: input_tensor})
+        q = (raw_outs / raw_outs.max()) * 255
+        layer_name_parsed = layer_tensor.name.replace('/', '-').replace(':', '_')
+        root_dir = 'misc' + os.sep + layer_name_parsed
+        num_inputs = q.shape[0]
+        num_feature_maps = q.shape[-1]
+        if not os.path.isdir(root_dir):
+            os.makedirs(root_dir)
+        for i in range(num_inputs):
+            dirpath = root_dir + os.sep + 'batch_' + str(i)
+            if not os.path.isdir(dirpath):
+                os.makedirs(dirpath)
+            for j in range(num_feature_maps):
+                fpath = dirpath + os.sep + '-'.join(['feature_' + str(j), 'batch_' + str(i),
+                                                     'layer_' + layer_name_parsed]) + '.png'
+                print('writing', fpath)
+                cv2.imwrite(fpath, cv2.resize(q[i, :, :, j], (200, 200), interpolation=cv2.INTER_NEAREST))
+
     def train_step(self, x_in, y, actions):
         x = x_in / 255.
         # self.viz_inputs(x, 'train')
+        # self.viz_layer_outs(self.layers[0], x)
         if self.dropout_enabled:
             l2_loss, loss, _, step_tf = self.sess.run([self.reduced_loss, self.loss, self.train_op, self.step_ph],
                                                       feed_dict={self.x_tensor: x,
@@ -205,6 +222,7 @@ class DQN:
                    batch_norm=False, activation=tf.nn.relu, pooling=False, pool_ksize=3, pool_stride=1,
                    pool_padding="VALID", pooling_fn=tf.nn.max_pool, block_depth=1, make_residual=False,
                    compute_bn_mean_var=None):
+        num_global_vars_init = len(tf.global_variables())
         if compute_bn_mean_var is None:
             compute_bn_mean_var = self.compute_bn_mean_var
         if not batch_norm:
@@ -240,9 +258,11 @@ class DQN:
             output = tf.nn.dropout(output, rate=self.dropout_rate_tensor)
             curr_layer.append(output)
         self.layers.append(curr_layer)
+        self.param_tensors_layerwise.append(tf.global_variables()[num_global_vars_init:])
         return output
 
     def dense_block(self, x_in, num_outs, batch_norm=False, activation=tf.nn.relu):
+        num_global_vars_init = len(tf.global_variables())
         curr_layer = []
         biased = False
         if not batch_norm:
@@ -259,6 +279,7 @@ class DQN:
             layer_outs = tf.nn.dropout(layer_outs, rate=self.dropout_rate_tensor)
             curr_layer.append(layer_outs)
         self.layers.append(curr_layer)
+        self.param_tensors_layerwise.append(tf.global_variables()[num_global_vars_init:])
         return layer_outs
 
     def __get_nn_vars_and_ops(self):
@@ -282,12 +303,9 @@ class DQN:
         layer_outs = self.dense_block(tf.reshape(layer_outs, [-1, flat_len]), 512, activation=tf.nn.relu)
         layer_outs = self.dense_block(layer_outs, self.num_classes, activation=None)
         layer_outs = tf.identity(layer_outs, name='qval_pred')
-
-        restore_excluded_vars = []
-
         stop_grad_vars_and_ops = [[], []]
         trainable_vars = tf.trainable_variables()
-        return layer_outs, trainable_vars, restore_excluded_vars, stop_grad_vars_and_ops
+        return layer_outs, trainable_vars, stop_grad_vars_and_ops
 
 
 

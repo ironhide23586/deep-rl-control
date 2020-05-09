@@ -45,11 +45,11 @@ class DQNEnvironment:
 
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
                  replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
-                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=100,
+                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=100, viz_fps=60, num_plot_points=100,
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
                  video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,
                  max_replay_buffer_inmemory_size=50000, experience_db_sample_frac=.5,
-                 refresh_replay_cache_every_n_experiences=900, write_video_every_n_frames=36000):
+                 refresh_replay_cache_every_n_experiences=100, write_video_every_n_frames=36000):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps
@@ -251,6 +251,8 @@ class DQNEnvironment:
     def train_agent(self):
         try:
             print('Starting progress...')
+            if not self.random_exploration_active:
+                self.print_train_start_text()
             if self.frame_count < self.replay_start_size:
                 print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
                 pbar_frame_counts = tqdm(total=self.replay_start_size, position=0, leave=True)
@@ -362,30 +364,36 @@ class DQNEnvironment:
             cache_writeout = not self.random_exploration_active
             self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=cache_writeout)
 
-    def write_and_refresh_replay_buffer_inmemory(self, refresh_inememory_experiences=True):
-        if len(self.replay_buffer_inmemory) == 0:
+    def write_and_refresh_replay_buffer_inmemory(self, refresh_inememory_experiences=True, save_model=True):
+        if not refresh_inememory_experiences and len(self.replay_buffer_inmemory) == 0:
             print('No experiences in memory, nothing to write to DB....')
             return
         self.replay_buffer_db = shelve.open(self.cache_fpath)
         record_len = len(self.replay_buffer_inmemory) - self.num_db_sampled_experiences
         print('Writing new', record_len, ' in-memory experiences to disk...')
+        new_experience_indices = []
         for i in tqdm(range(record_len), position=0, leave=True):
-            exp = self.replay_buffer_inmemory[i + self.num_db_sampled_experiences]
-            self.replay_buffer_db[str(exp[0])] = exp[1:]
+            idx = i + self.num_db_sampled_experiences
+            experience = self.replay_buffer_inmemory[idx]
+            experience_idx = experience[0]
+            new_experience_indices.append(experience_idx)
+            self.replay_buffer_db[str(experience_idx)] = experience[1:]
         if self.random_exploration_active:
             self.replay_buffer_inmemory = []
         if refresh_inememory_experiences:
             self.replay_buffer_inmemory = []
             db_experience_indices = list(map(int, list(self.replay_buffer_db.keys())))
-            print('Sampling random', self.n_db_sample, 'experiences from', len(db_experience_indices),
-                  'experiences stored on disk and loading them to memory...')
             self.num_db_sampled_experiences = min(len(db_experience_indices), self.n_db_sample)
+            print('Sampling random', self.num_db_sampled_experiences, 'experiences from', len(db_experience_indices),
+                  'experiences stored on disk and loading them to memory...')
             selected_db_indices = sorted(map(int, np.random.choice(db_experience_indices,
-                                                                   self.num_db_sampled_experiences)))
+                                                                   self.num_db_sampled_experiences, replace=False)))
             for i in tqdm(range(len(selected_db_indices)), position=0, leave=True):
                 experience = [selected_db_indices[i]] + self.replay_buffer_db[str(selected_db_indices[i])]
                 self.replay_buffer_inmemory.append(experience)
         self.replay_buffer_db.close()
+        if save_model:
+            self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
 
     def phi(self):
         ims = [self.prev_bgr_frame, self.curr_bgr_frame]
@@ -460,6 +468,7 @@ class DQNEnvironment:
             nn_input_new = np.zeros_like(nn_input_prev)
             nn_input_new[:, :, :-1] = nn_input_prev[:, :, 1:]
             nn_input_new[:, :, -1] = new_frame
+            # 0, 1 -> no-op; 2->Right, 3->Left
             actions_targ, action_probs, action_qvals = self.dqn_constant.infer(np.expand_dims(nn_input_new, 0))
             max_qval = reward + self.discount_factor * action_qvals.max()
             if death:
@@ -504,7 +513,7 @@ class DQNEnvironment:
         self.dqn_constant.load(s)
         if not init_mode:
             self.write_video()
-        self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False)
+        self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False, save_model=False)
 
 
 if __name__ == '__main__':

@@ -83,10 +83,11 @@ class DQN:
         l2_losses = [self.l2_regularizer_coeff * tf.nn.l2_loss(v) for v in self.trainable_vars]
         self.loss = tf.reduce_mean(self.loss_op)
         self.reduced_loss = self.loss + tf.add_n(l2_losses)
-        self.grads_tensor = None
         self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, momentum=.95)
-        self.train_op = self.opt.minimize(self.loss, global_step=self.step_ph, var_list=self.trainable_vars,
-                                          grad_loss=self.grads_tensor, name='rmsprop_train_op')
+        self.grads_and_vars_tensor = self.opt.compute_gradients(self.loss, var_list=self.trainable_vars)
+        self.grads_tensor = [gv[0] for gv in self.grads_and_vars_tensor if gv[0] is not None]
+        self.train_op = self.opt.apply_gradients(self.grads_and_vars_tensor, global_step=self.step_ph,
+                                                 name='rmsprop_train_op')
         self.saver = tf.train.Saver(max_to_keep=0)
         self.restorer = tf.train.Saver()
 
@@ -183,22 +184,24 @@ class DQN:
 
     def viz_layer_outs(self, layer_tensor, input_tensor):
         raw_outs = self.sess.run(layer_tensor, feed_dict={self.x_tensor: input_tensor})
-        q = (raw_outs / raw_outs.max()) * 255
-        layer_name_parsed = layer_tensor.name.replace('/', '-').replace(':', '_')
-        root_dir = 'misc' + os.sep + layer_name_parsed
-        num_inputs = q.shape[0]
-        num_feature_maps = q.shape[-1]
-        if not os.path.isdir(root_dir):
-            os.makedirs(root_dir)
-        for i in range(num_inputs):
-            dirpath = root_dir + os.sep + 'batch_' + str(i)
-            if not os.path.isdir(dirpath):
-                os.makedirs(dirpath)
-            for j in range(num_feature_maps):
-                fpath = dirpath + os.sep + '-'.join(['feature_' + str(j), 'batch_' + str(i),
-                                                     'layer_' + layer_name_parsed]) + '.png'
-                print('writing', fpath)
-                cv2.imwrite(fpath, cv2.resize(q[i, :, :, j], (200, 200), interpolation=cv2.INTER_NEAREST))
+        if len(raw_outs.shape) == 4:
+            q = (raw_outs / raw_outs.max()) * 255
+            layer_name_parsed = layer_tensor.name.replace('/', '-').replace(':', '_')
+            root_dir = 'misc' + os.sep + layer_name_parsed
+            num_inputs = q.shape[0]
+            num_feature_maps = q.shape[-1]
+            if not os.path.isdir(root_dir):
+                os.makedirs(root_dir)
+            for i in range(num_inputs):
+                dirpath = root_dir + os.sep + 'batch_' + str(i)
+                if not os.path.isdir(dirpath):
+                    os.makedirs(dirpath)
+                for j in range(num_feature_maps):
+                    fpath = dirpath + os.sep + '-'.join(['feature_' + str(j), 'batch_' + str(i),
+                                                         'layer_' + layer_name_parsed]) + '.png'
+                    print('writing', fpath)
+                    cv2.imwrite(fpath, cv2.resize(q[i, :, :, j], (200, 200), interpolation=cv2.INTER_NEAREST))
+        return raw_outs
 
     def train_step(self, x_in, y, actions):
         x = x_in / 255.
@@ -211,10 +214,11 @@ class DQN:
                                                                  self.actions_tensor: actions,
                                                                  self.dropout_rate_tensor: self.dropout_rate})
         else:
-            l2_loss, loss, _, step_tf = self.sess.run([self.reduced_loss, self.loss, self.train_op, self.step_ph],
-                                                      feed_dict={self.x_tensor: x,
-                                                                 self.y_gt: y,
-                                                                 self.actions_tensor: actions})
+            l2_loss, loss, _, step_tf, grads, q_pred = self.sess.run([self.reduced_loss, self.loss, self.train_op,
+                                                                      self.step_ph, self.grads_tensor, self.q_pred],
+                                                             feed_dict={self.x_tensor: x,
+                                                                        self.y_gt: y,
+                                                                        self.actions_tensor: actions})
         self.step = step_tf
         return l2_loss, loss, step_tf
 

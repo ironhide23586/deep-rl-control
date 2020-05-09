@@ -45,11 +45,11 @@ class DQNEnvironment:
 
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
                  replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
-                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=100, viz_fps=60, num_plot_points=100,
+                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=100,
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
                  video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,
                  max_replay_buffer_inmemory_size=50000, experience_db_sample_frac=.5,
-                 refresh_replay_cache_every_n_experiences=100, write_video_every_n_frames=36000):
+                 refresh_replay_cache_every_n_experiences=900, write_video_every_n_frames=36000):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps
@@ -249,44 +249,44 @@ class DQNEnvironment:
             self.sync_and_save_params(init_mode=True)
 
     def train_agent(self):
-        try:
-            print('Starting progress...')
-            if not self.random_exploration_active:
-                self.print_train_start_text()
-            if self.frame_count < self.replay_start_size:
-                print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
-                pbar_frame_counts = tqdm(total=self.replay_start_size, position=0, leave=True)
-                pbar_frame_counts.update(np.clip(self.frame_count, None, self.replay_start_size))
-                pbar_train_steps = None
+        # try:
+        print('Starting progress...')
+        if not self.random_exploration_active:
+            self.print_train_start_text()
+        if self.frame_count < self.replay_start_size:
+            print('Warm-starting by collecting random experiences, NO TRAINING IS HAPPENING NOW!')
+            pbar_frame_counts = tqdm(total=self.replay_start_size, position=0, leave=True)
+            pbar_frame_counts.update(np.clip(self.frame_count, None, self.replay_start_size))
+            pbar_train_steps = None
+        else:
+            pbar_train_steps = tqdm(total=self.num_train_steps, position=0, leave=True)
+            pbar_train_steps.update(self.curr_train_step)
+        prev_random_exploration_active = self.random_exploration_active
+        prev_frame_count = self.frame_count
+        while self.curr_train_step < self.num_train_steps:
+            if self.frame_count >= self.replay_start_size:
+                self.train_step()
+                if pbar_train_steps is None:
+                    pbar_train_steps = tqdm(total=self.num_train_steps, position=0, leave=True)
+                pbar_train_steps.update(1)
+                curr_random_exploration_active = self.random_exploration_active
+                if prev_random_exploration_active and not curr_random_exploration_active:
+                    pbar_frame_counts.clear()
             else:
-                pbar_train_steps = tqdm(total=self.num_train_steps, position=0, leave=True)
-                pbar_train_steps.update(self.curr_train_step)
+                pbar_frame_counts.update(self.frame_count - prev_frame_count)
+                prev_frame_count = self.frame_count
             prev_random_exploration_active = self.random_exploration_active
-            prev_frame_count = self.frame_count
-            while self.curr_train_step < self.num_train_steps:
-                if self.frame_count >= self.replay_start_size:
-                    self.train_step()
-                    if pbar_train_steps is None:
-                        pbar_train_steps = tqdm(total=self.num_train_steps, position=0, leave=True)
-                    pbar_train_steps.update(1)
-                    curr_random_exploration_active = self.random_exploration_active
-                    if prev_random_exploration_active and not curr_random_exploration_active:
-                        pbar_frame_counts.clear()
-                else:
-                    pbar_frame_counts.update(self.frame_count - prev_frame_count)
-                    prev_frame_count = self.frame_count
-                prev_random_exploration_active = self.random_exploration_active
-                for i in range(self.sample_freq):
-                    self.perform_action()
-                self.populate_experience()
-                if self.frame_count >= self.replay_start_size:
-                    self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
-                    self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
-                if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
-                    self.sync_and_save_params()
-            self.die()
-        except:
-            self.die()
+            for i in range(self.sample_freq):
+                self.perform_action()
+            self.populate_experience()
+            if self.frame_count >= self.replay_start_size:
+                self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
+                self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
+            if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
+                self.sync_and_save_params()
+        self.die()
+        # except:
+        #     self.die()
 
     def print_train_start_text(self):
         print('----+++------REACHED REPLAY BREAK-EVEN at frame', self.frame_count, '------+++----')
@@ -392,7 +392,7 @@ class DQNEnvironment:
                 experience = [selected_db_indices[i]] + self.replay_buffer_db[str(selected_db_indices[i])]
                 self.replay_buffer_inmemory.append(experience)
         self.replay_buffer_db.close()
-        if save_model:
+        if save_model and not self.random_exploration_active:
             self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
 
     def phi(self):
@@ -513,7 +513,7 @@ class DQNEnvironment:
         self.dqn_constant.load(s)
         if not init_mode:
             self.write_video()
-        self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False, save_model=False)
+        self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False, save_model=not init_mode)
 
 
 if __name__ == '__main__':

@@ -45,7 +45,7 @@ class DQNEnvironment:
 
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
                  replay_buffer_size=1000000, history_size=4, num_train_steps=100000,
-                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=100,
+                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=1000,
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
                  video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,
                  max_replay_buffer_inmemory_size=20000, experience_db_sample_frac=.5,
@@ -306,9 +306,9 @@ class DQNEnvironment:
         print('Exiting....🏃')
 
     def plot_stats(self):
-        idx = np.linspace(0, len(self.plot_frame_indices) - 1,
-                          np.clip(self.num_plot_points, None,
-                                  len(self.plot_frame_indices)).astype(np.int)).astype(np.int)
+        n_plot_points = np.clip(self.num_plot_points, None, len(self.plot_frame_indices)).astype(np.int)
+        # idx = np.linspace(0, len(self.plot_frame_indices) - 1, n_plot_points).astype(np.int)
+        idx = np.sort(np.random.choice(np.arange(len(self.plot_frame_indices)), n_plot_points).astype(np.int))
         frame_indices = np.array(self.plot_frame_indices)[idx]
         curr_r = np.array(self.curr_episode_rewards)[idx]
         best_r = np.array(self.best_episode_rewards)[idx]
@@ -322,9 +322,9 @@ class DQNEnvironment:
         plt.tight_layout()
         plt.savefig(self.curr_plots_dir + os.sep + 'rewards_plot.jpg')
         plt.clf()
-        idx = np.linspace(0, len(self.plot_loss_train_steps) - 1,
-                          np.clip(self.num_plot_points, None,
-                                  len(self.plot_loss_train_steps)).astype(np.int)).astype(np.int)
+        n_plot_points = np.clip(self.num_plot_points, None, len(self.plot_loss_train_steps)).astype(np.int)
+        # idx = np.linspace(0, len(self.plot_loss_train_steps) - 1, n_plot_points).astype(np.int)
+        idx = np.sort(np.random.choice(np.arange(len(self.plot_loss_train_steps)), n_plot_points).astype(np.int))
         loss_indices = np.array(self.plot_loss_train_steps)[idx]
         losses = np.array(self.plot_losses)[idx]
         losses = np.clip(losses, None, .0007)
@@ -385,8 +385,8 @@ class DQNEnvironment:
             self.replay_buffer_inmemory = []
             db_experience_indices = list(map(int, list(self.replay_buffer_db.keys())))
             num_db_sampled_experiences = min(len(db_experience_indices), self.n_db_sample)
-            print('Sampling random', num_db_sampled_experiences, 'experiences from', len(db_experience_indices),
-                  'experiences stored on disk and loading them to memory...')
+            # print('Sampling random', num_db_sampled_experiences, 'experiences from', len(db_experience_indices),
+            #       'experiences stored on disk and loading them to memory...')
             selected_db_indices = sorted(map(int, np.random.choice(db_experience_indices,
                                                                    num_db_sampled_experiences, replace=False)))
             for i in tqdm(range(len(selected_db_indices)), position=0, leave=True):
@@ -433,11 +433,10 @@ class DQNEnvironment:
             self.nn_input[0, :, :, :-1] = self.nn_input[0, :, :, 1:]
             self.nn_input[0, :, :, -1] = self.curr_frame
         if done or self.num_lives <= 0:
+            self.env.seed()
             self.curr_bgr_frame = self.env.reset()
             self.first_run = True
-            self.total_episode_ema_reward = (1 - self.episodic_reward_ema_alpha) * self.total_episode_ema_reward + \
-                                            self.episodic_reward_ema_alpha * (self.curr_episode_reward -
-                                                                              self.total_episode_ema_reward)
+            self.total_episode_ema_reward = np.mean([self.curr_episode_reward] + self.curr_episode_rewards)
             if self.curr_episode_reward > self.best_episode_reward:
                 self.best_episode_reward = self.curr_episode_reward
             self.curr_episode_reward = 0.
@@ -510,6 +509,7 @@ class DQNEnvironment:
                   ', random_action_prob =', self.random_action_prob)
             print('--> episodic_reward: EMA=', self.total_episode_ema_reward, ', BEST=', self.best_episode_reward,
                   ', CURRENT=', self.curr_episode_reward)
+            print('Learning Rate =', self.dqn_action.learn_rate)
 
     def sync_and_save_params(self, init_mode=False):
         print('Syncing Params of the 2 DQNs....')

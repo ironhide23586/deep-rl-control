@@ -23,7 +23,7 @@ import cv2
 class DQN:
 
     def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
-                 learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
+                 learn_rate=.01, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
                  discount_factor=.99, update_batchnorm_means_vars=True, optimized_inference=False,
                  load_training_vars=True, model_folder=None, model_prefix='model'):
         if model_folder is None:
@@ -224,9 +224,10 @@ class DQN:
                                               feed_dict={self.x_tensor: x,
                                                          self.y_gt: y,
                                                          self.actions_tensor: actions})
-        loss_np = np.mean(np.square(np.array(y) - np.array(q_pred)))
-        gm = np.mean([np.abs(g).mean() for g in grads])
+        # loss_np = np.mean(np.square(np.array(y) - np.array(q_pred)))
+        # gm = np.mean([np.abs(g).mean() for g in grads])
         self.step = step_tf  # Gradients vanishing before train step 221
+        self.learn_rate = lr
         return l2_loss, loss, step_tf
 
     def conv_block(self, x_in, output_filters, kernel_size=3, kernel_stride=1, dilation=1, padding="VALID",

@@ -44,7 +44,7 @@ def force_delete(fpath):
 class DQNEnvironment:
 
     def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
-                 replay_buffer_size=1000000, history_size=4, num_train_steps=100000,
+                 replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
                  batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=1000,
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
                  video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,

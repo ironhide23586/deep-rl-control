@@ -24,7 +24,7 @@ import cv2
 class DQN:
 
     def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
-                 learn_rate=.01, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
+                 learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
                  discount_factor=.99, update_batchnorm_means_vars=True, optimized_inference=False,
                  load_training_vars=True, model_folder=None, model_prefix='model'):
         if model_folder is None:
@@ -229,29 +229,24 @@ class DQN:
         # gm = np.mean([np.abs(g).mean() for g in grads])
         self.step = step_tf  # Gradients vanishing before train step 11552
         self.learn_rate = lr  # 0 outs at layer 3 <tf.Tensor 'conv2d_5/Relu:0' shape=(?, 7, 7, 64) dtype=float32>
+        # self.analyze_layer(x, 3)
+        return l2_loss, loss, step_tf
 
-        layer_out_maxs = [self.viz_layer_outs(self.layers[i][-1], x, writeviz=False).max()
-                          for i in range(len(self.layers))]
-        layer_idx = 3
-
-        nn_layer_ins, nn_layer_outs = self.sess.run([self.layers[layer_idx - 1][-1], self.layers[layer_idx][-1]],
-                                                     feed_dict={self.x_tensor: x})
+    def analyze_layer(self, x, layer_idx):
+        nn_layer_ins, nn_layer_outs_linear, nn_layer_outs_relu \
+            = self.sess.run([self.layers[layer_idx - 1][-1], self.layers[layer_idx][0], self.layers[layer_idx][1]],
+                            feed_dict={self.x_tensor: x})
         weights = self.param_tensors_layerwise[layer_idx][0].eval(self.sess)
         biases = self.param_tensors_layerwise[layer_idx][1].eval(self.sess)
-        np_layer_outs = self.np_convolve(weights, biases, nn_layer_ins, stride=1, activation=False)
-        d = np.abs(nn_layer_outs - np_layer_outs)
-        e = d.mean()
-        print(e, d.max())
 
-        # batch_idx = 0
-        # f = biases > 0
-        # pos_channel_idx = np.arange(biases.shape[0])[f]
-        # pos_channel_filters = weights[:, :, :, pos_channel_idx]
-        # pos_channel_biases = biases[pos_channel_idx]
-        # pos_nn_outs = np.rollaxis(nn_layer_outs[batch_idx, :, :, pos_channel_idx], 0, 3)
-        # np_layer_outs = self.np_convolve(weights, biases, nn_layer_ins, stride=1)
+        np_layer_outs_linear = self.np_convolve(weights, biases, nn_layer_ins, stride=1, activation=False)
+        d_linear = np.abs(nn_layer_outs_linear - np_layer_outs_linear)
+        e_linear = d_linear.mean()
 
-        return l2_loss, loss, step_tf
+        np_layer_outs_relu = self.np_convolve(weights, biases, nn_layer_ins, stride=1, activation=True)
+        d_relu = np.abs(nn_layer_outs_relu - np_layer_outs_relu)
+        e_relu = d_relu.mean()
+        print(e_linear, e_relu)
 
     def np_convolve(self, filters, biases, x_in, stride=1, activation=True):
         n, d_in, _, c_in_x = x_in.shape
@@ -293,9 +288,12 @@ class DQN:
             make_residual = False
         for depth in range(block_depth):
             layer_out = tf.layers.conv2d(layer_out, output_filters, kernel_size, strides=kernel_stride,
-                                         use_bias=use_bias, activation=activation, dilation_rate=dilation,
+                                         use_bias=use_bias, dilation_rate=dilation,
                                          padding=padding)
             curr_layer.append(layer_out)
+            if activation is not None:
+                layer_out = activation(layer_out)
+                curr_layer.append(layer_out)
             if pooling:
                 layer_out = pooling_fn(layer_out, ksize=[1, pool_ksize, pool_ksize, 1],
                                        strides=[1, pool_stride, pool_stride, 1], padding=pool_padding)
@@ -352,7 +350,7 @@ class DQN:
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
         layer_outs = self.conv_block(layer_outs, 64, kernel_size=4, kernel_stride=2,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = self.conv_block(layer_outs, 64, kernel_size=3, kernel_stride=1, activation=None,
+        layer_outs = self.conv_block(layer_outs, 64, kernel_size=3, kernel_stride=1,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
 
         shp = layer_outs.shape

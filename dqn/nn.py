@@ -14,6 +14,7 @@ Website: https://www.linkedin.com/in/souham/
 
 import os
 from glob import glob
+import itertools
 
 import tensorflow as tf
 import numpy as np
@@ -185,9 +186,9 @@ class DQN:
             for i in range(a.shape[-1]):
                 cv2.imwrite('misc/' + prefix + str(b) + '-' + str(i) + '.png', a[:, :, i])
 
-    def viz_layer_outs(self, layer_tensor, input_tensor):
+    def viz_layer_outs(self, layer_tensor, input_tensor, writeviz=True):
         raw_outs = self.sess.run(layer_tensor, feed_dict={self.x_tensor: input_tensor})
-        if len(raw_outs.shape) == 4:
+        if len(raw_outs.shape) == 4 and writeviz:
             q = (raw_outs / raw_outs.max()) * 255
             layer_name_parsed = layer_tensor.name.replace('/', '-').replace(':', '_')
             root_dir = 'misc' + os.sep + layer_name_parsed
@@ -226,9 +227,54 @@ class DQN:
                                                          self.actions_tensor: actions})
         # loss_np = np.mean(np.square(np.array(y) - np.array(q_pred)))
         # gm = np.mean([np.abs(g).mean() for g in grads])
-        self.step = step_tf  # Gradients vanishing before train step 221
-        self.learn_rate = lr
+        self.step = step_tf  # Gradients vanishing before train step 11552
+        self.learn_rate = lr  # 0 outs at layer 3 <tf.Tensor 'conv2d_5/Relu:0' shape=(?, 7, 7, 64) dtype=float32>
+
+        layer_out_maxs = [self.viz_layer_outs(self.layers[i][-1], x, writeviz=False).max()
+                          for i in range(len(self.layers))]
+        layer_idx = 3
+
+        nn_layer_ins, nn_layer_outs = self.sess.run([self.layers[layer_idx - 1][-1], self.layers[layer_idx][-1]],
+                                                     feed_dict={self.x_tensor: x})
+        weights = self.param_tensors_layerwise[layer_idx][0].eval(self.sess)
+        biases = self.param_tensors_layerwise[layer_idx][1].eval(self.sess)
+        np_layer_outs = self.np_convolve(weights, biases, nn_layer_ins, stride=1, activation=False)
+        d = np.abs(nn_layer_outs - np_layer_outs)
+        e = d.mean()
+        print(e, d.max())
+
+        # batch_idx = 0
+        # f = biases > 0
+        # pos_channel_idx = np.arange(biases.shape[0])[f]
+        # pos_channel_filters = weights[:, :, :, pos_channel_idx]
+        # pos_channel_biases = biases[pos_channel_idx]
+        # pos_nn_outs = np.rollaxis(nn_layer_outs[batch_idx, :, :, pos_channel_idx], 0, 3)
+        # np_layer_outs = self.np_convolve(weights, biases, nn_layer_ins, stride=1)
+
         return l2_loss, loss, step_tf
+
+    def np_convolve(self, filters, biases, x_in, stride=1, activation=True):
+        n, d_in, _, c_in_x = x_in.shape
+        ksize, _, c_in_f, c_out = filters.shape
+        in2out_mindim = lambda dim_in: ((dim_in - ksize) // stride) + 1
+        out2in_mindim = lambda dim_out: stride * dim_out
+        out2in_maxdim = lambda dim_out: out2in_mindim(dim_out) + ksize - 1
+        d_out = in2out_mindim(d_in)
+        get_receptive_field = lambda x, y: x_in[:, out2in_mindim(y): out2in_maxdim(y) + 1,
+                                                out2in_mindim(x): out2in_maxdim(x) + 1, :]
+
+        reshape_rf_for_conv_input = lambda rf: np.rollaxis(np.tile(np.expand_dims(rf, 1), [1, c_out, 1, 1, 1]), 1, 5)
+        filters_repeated = np.tile(np.expand_dims(filters, 0), [n, 1, 1, 1, 1])
+        biases_repeated = np.tile(np.expand_dims(biases, 0), [n, 1])
+        get_conv_output_elemwise = lambda x, y: reshape_rf_for_conv_input(get_receptive_field(x, y)) * filters_repeated
+        get_filters_outs = lambda x, y: get_conv_output_elemwise(x, y).reshape([n, -1, c_out]).sum(axis=1)
+        get_layer_out_rf = lambda xy: get_filters_outs(xy[0], xy[1]) + biases_repeated
+        all_out_xys = list(itertools.product(np.arange(d_out), np.arange(d_out)))
+        y = np.array(list(map(get_layer_out_rf, all_out_xys)))
+        y = np.transpose(np.rollaxis(y, 0, 2).reshape([n, d_out, d_out, -1]), [0, 2, 1, 3])
+        if activation:
+            y[y < 0] = 0.
+        return y
 
     def conv_block(self, x_in, output_filters, kernel_size=3, kernel_stride=1, dilation=1, padding="VALID",
                    batch_norm=False, activation=tf.nn.relu, pooling=False, pool_ksize=3, pool_stride=1,
@@ -306,7 +352,7 @@ class DQN:
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
         layer_outs = self.conv_block(layer_outs, 64, kernel_size=4, kernel_stride=2,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = self.conv_block(layer_outs, 64, kernel_size=3, kernel_stride=1,
+        layer_outs = self.conv_block(layer_outs, 64, kernel_size=3, kernel_stride=1, activation=None,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
 
         shp = layer_outs.shape

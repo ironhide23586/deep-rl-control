@@ -94,10 +94,10 @@ class DQNEnvironment:
         self.replay_break_even_train_step = 0
 
         self.video_out_fpath_prefix = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-'
-        self.dqn_constant = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
-                                model_prefix=self.env_name, num_train_steps=self.num_train_steps)
         self.dqn_action = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
                               model_prefix=self.env_name, num_train_steps=self.num_train_steps)
+        self.dqn_constant = DQN(num_classes=self.env.action_space.n, other_dqn=self.dqn_action,
+                                optimized_inference=True)
         self.frame_count = 0
         self.curr_train_step = 0
         self.flicker_buffer_size = flicker_buffer_size
@@ -209,6 +209,8 @@ class DQNEnvironment:
         self.dqn_constant.init()
         self.dqn_action.init()
         self.dqn_action.load()
+        s = self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
+        self.dqn_constant.load(s)
         self.curr_train_step = self.dqn_action.step
         self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
         db_exists = os.path.isfile(self.cache_fpath + '.dat')
@@ -472,7 +474,7 @@ class DQNEnvironment:
             nn_input_new[:, :, :-1] = nn_input_prev[:, :, 1:]
             nn_input_new[:, :, -1] = new_frame
             # 0, 1 -> no-op; 2->Right, 3->Left
-            actions_targ, action_probs, action_qvals = self.dqn_constant.infer(np.expand_dims(nn_input_new, 0))
+            action_qvals = self.dqn_constant.infer(np.expand_dims(nn_input_new, 0))
             max_qval = reward + self.discount_factor * action_qvals.max()
             if death:
                 max_qval = reward

@@ -26,7 +26,7 @@ class DQN:
     def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
                  learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
                  discount_factor=.99, update_batchnorm_means_vars=True, optimized_inference=False,
-                 load_training_vars=True, model_folder=None, model_prefix='model'):
+                 load_training_vars=True, model_folder=None, model_prefix='model', other_dqn=None):
         if model_folder is None:
             self.model_folder = 'all_trained_models/trained_models'
         else:
@@ -38,69 +38,76 @@ class DQN:
         self.num_classes = num_classes
         self.im_h = im_h
         self.im_w = im_w
+        self.other_dqn = other_dqn
         self.num_train_steps = num_train_steps
         self.compute_bn_mean_var = compute_bn_mean_var
         self.optimized_inference = optimized_inference
-        self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, 4],
-                                       name='input_x_tensor')
-        self.actions_tensor = tf.placeholder(tf.int32, shape=[None], name='actions_tensor')
-        self.layers = [self.x_tensor]
-        self.param_tensors_layerwise = [[]]
 
-        self.start_step = start_step
-        self.step = start_step
-        self.learn_rate = learn_rate
-        self.step_ph = tf.Variable(self.start_step, trainable=False, name='train_step')
-        self.discount_factor_tensor = tf.constant(discount_factor)
+        self.g = tf.Graph()
 
-        self.learn_rate_tf = tf.Variable(self.learn_rate, trainable=False, name='learn_rate')
-        self.unsaved_vars = []
+        with self.g.as_default():
+            n0 = len(tf.global_variables())
+            self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, 4])
+            self.actions_tensor = tf.placeholder(tf.int32, shape=[None])
+            self.layers = [self.x_tensor]
+            self.param_tensors_layerwise = [[]]
 
-        self.sess = None
-        if self.optimized_inference:
-            self.dropout_enabled = False
-            self.y_pred, _, _ = self.init_nn_graph()
+            self.start_step = start_step
+            self.step = start_step
+            self.learn_rate = learn_rate
+            self.step_ph = tf.Variable(self.start_step, trainable=False)
+            self.discount_factor_tensor = tf.constant(discount_factor)
+
+            self.learn_rate_tf = tf.Variable(self.learn_rate, trainable=False)
+            self.unsaved_vars = []
+
+            self.sess = None
+            if self.optimized_inference:
+                self.dropout_enabled = False
+                self.y_pred, self.trainable_vars, _ = self.init_nn_graph()
+                # if other_dqn is not None:
+                #     self.sync_ops = [self.trainable_vars[i].assign(self.other_dqn.trainable_vars[i])
+                #                      for i in range(len(self.trainable_vars))]
+                self.restorer = tf.train.Saver(var_list=self.trainable_vars)
+                self.all_vars = tf.global_variables()[n0:]
+                return
+            self.dropout_enabled = dropout_enabled
+            self.l2_regularizer_coeff = l2_regularizer_coeff
+            self.y_gt = tf.placeholder(tf.float32, shape=[None], name='qvals_gt')
+            if self.dropout_enabled:
+                self.dropout_rate = dropout_rate
+                self.dropout_rate_tensor = tf.placeholder(tf.float32, shape=())
+            self.y_pred, self.trainable_vars, stop_grad_vars_and_ops = self.init_nn_graph()
             self.outs_softmax_op = tf.nn.softmax(self.y_pred)
-            self.outs_final = tf.argmax(self.outs_softmax_op, axis=-1), self.outs_softmax_op, self.y_pred
-            self.vars_to_keep = [v for v in tf.global_variables() if v not in self.unsaved_vars]
-            self.restorer = tf.train.Saver(var_list=self.vars_to_keep)
-            return
-        self.dropout_enabled = dropout_enabled
-        self.l2_regularizer_coeff = l2_regularizer_coeff
-        self.y_gt = tf.placeholder(tf.float32, shape=[None], name='qvals_gt')
-        if self.dropout_enabled:
-            self.dropout_rate = dropout_rate
-            self.dropout_rate_tensor = tf.placeholder(tf.float32, shape=())
-        self.y_pred, self.trainable_vars, stop_grad_vars_and_ops = self.init_nn_graph()
-        self.outs_softmax_op = tf.nn.softmax(self.y_pred)
-        self.actions = tf.argmax(self.y_pred, axis=-1)
-        self.outs_final = self.actions, self.outs_softmax_op, self.y_pred
+            self.actions = tf.argmax(self.y_pred, axis=-1)
+            self.outs_final = self.actions, self.outs_softmax_op, self.y_pred
 
-        self.stop_grad_vars, self.stop_grad_update_ops = stop_grad_vars_and_ops
+            self.stop_grad_vars, self.stop_grad_update_ops = stop_grad_vars_and_ops
 
-        self.q_pred = tf.reduce_sum(self.y_pred * tf.one_hot(self.actions_tensor, self.num_classes), axis=1)
+            self.q_pred = tf.reduce_sum(self.y_pred * tf.one_hot(self.actions_tensor, self.num_classes), axis=1)
 
-        self.loss_op = tf.math.squared_difference(self.q_pred, self.y_gt)
-        self.learn_rate_tf = tf.train.polynomial_decay(self.learn_rate_tf, global_step=self.step_ph,
-                                                       decay_steps=self.num_train_steps, end_learning_rate=1e-6)
+            self.loss_op = tf.math.squared_difference(self.q_pred, self.y_gt)
+            self.learn_rate_tf = tf.train.polynomial_decay(self.learn_rate_tf, global_step=self.step_ph,
+                                                           decay_steps=self.num_train_steps, end_learning_rate=1e-6)
 
-        l2_losses = [self.l2_regularizer_coeff * tf.nn.l2_loss(v) for v in self.trainable_vars]
-        self.loss = tf.reduce_mean(self.loss_op)
-        self.reduced_loss = self.loss + tf.add_n(l2_losses)
-        self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, decay=.95)
-        self.grads_and_vars_tensor = self.opt.compute_gradients(self.loss, var_list=self.trainable_vars)
-        self.grads_tensor = [gv[0] for gv in self.grads_and_vars_tensor if gv[0] is not None]
-        self.train_op = self.opt.apply_gradients(self.grads_and_vars_tensor, global_step=self.step_ph,
-                                                 name='rmsprop_train_op')
-        self.saver = tf.train.Saver(max_to_keep=0)
-        self.restorer = tf.train.Saver()
+            l2_losses = [self.l2_regularizer_coeff * tf.nn.l2_loss(v) for v in self.trainable_vars]
+            self.loss = tf.reduce_mean(self.loss_op)
+            self.reduced_loss = self.loss + tf.add_n(l2_losses)
+            self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, decay=.95)
+            self.grads_and_vars_tensor = self.opt.compute_gradients(self.loss, var_list=self.trainable_vars)
+            self.grads_tensor = [gv[0] for gv in self.grads_and_vars_tensor if gv[0] is not None]
+            self.train_op = self.opt.apply_gradients(self.grads_and_vars_tensor, global_step=self.step_ph,
+                                                     name='rmsprop_train_op')
+            self.saver = tf.train.Saver(max_to_keep=0)
+            self.restorer = tf.train.Saver()
+            self.all_vars = tf.global_variables()[n0:]
 
     def init(self):
         if not self.sess:
             config = tf.ConfigProto()
             config.gpu_options.allow_growth = True
-            self.sess = tf.Session(config=config)
-            init = tf.global_variables_initializer()
+            self.sess = tf.Session(config=config, graph=self.g)
+            init = tf.initialize_variables(self.all_vars)
             self.sess.run(init)
 
     def save(self, suffix=None):
@@ -150,10 +157,9 @@ class DQN:
         im = im_in / 255.
         # self.viz_inputs(im, 'infer')
         if self.dropout_enabled:
-            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im,
-                                                             self.dropout_rate_tensor: 0.})
+            outs = self.sess.run(self.y_pred, feed_dict={self.x_tensor: im, self.dropout_rate_tensor: 0.})
         else:
-            outs = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im})
+            outs = self.sess.run(self.y_pred, feed_dict={self.x_tensor: im})
         return outs
 
     def center_crop(self, x):
@@ -345,6 +351,7 @@ class DQN:
 
     # Architecture from paper https://web.stanford.edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf
     def init_nn_graph(self):
+        n = len(tf.trainable_variables())
         feature_extractor_bn_mean_var_compute = False
         layer_outs = self.conv_block(self.x_tensor, 32, kernel_size=8, kernel_stride=4,
                                      compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
@@ -360,7 +367,7 @@ class DQN:
         layer_outs = self.dense_block(layer_outs, self.num_classes, activation=None)
         layer_outs = tf.identity(layer_outs, name='qval_pred')
         stop_grad_vars_and_ops = [[], []]
-        trainable_vars = tf.trainable_variables()
+        trainable_vars = tf.trainable_variables()[n:]
         return layer_outs, trainable_vars, stop_grad_vars_and_ops
 
 

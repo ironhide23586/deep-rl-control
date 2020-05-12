@@ -141,7 +141,7 @@ class DQNEnvironment:
     def make_frame(self):
         while self.isalive:
             if self.video_buffer.empty():
-                time.sleep(1)
+                time.sleep(2)
                 continue
             im, train_step, frame_count, curr_episode_reward, \
             best_episode_reward, total_episode_ema_reward, random_action_prob, \
@@ -343,9 +343,9 @@ class DQNEnvironment:
               action = self.env.action_space.sample()
               self.random_action_taken = True
         else:
-            action_pred, _, _ = self.dqn_action.infer(self.nn_input)
+            action_qvals = self.dqn_action.infer(self.nn_input)
             self.random_action_taken = False
-            action = action_pred[0]
+            action = action_qvals.argmax()
         self.curr_action = action
         nn_input_prev = self.nn_input.copy().astype(np.uint8)
         reward, death = self.perform_action()

@@ -49,7 +49,7 @@ class DQNEnvironment:
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
                  video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,
                  max_replay_buffer_inmemory_size=20000, experience_db_sample_frac=.5,
-                 refresh_replay_cache_every_n_experiences=900, write_video_every_n_frames=36000):
+                 refresh_replay_cache_every_n_experiences=10000, write_video_every_n_frames=36000):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps

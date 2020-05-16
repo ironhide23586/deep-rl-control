@@ -329,7 +329,7 @@ class DQNEnvironment:
         idx = np.sort(np.random.choice(np.arange(len(self.plot_loss_train_steps)), n_plot_points).astype(np.int))
         loss_indices = np.array(self.plot_loss_train_steps)[idx]
         losses = np.array(self.plot_losses)[idx]
-        losses = np.clip(losses, None, .0007)
+        # losses = np.clip(losses, None, .0007)
         plt.plot(loss_indices, losses, '-', label='Loss')
         plt.legend(loc='best')
         plt.xlabel('Train Step')
@@ -402,10 +402,15 @@ class DQNEnvironment:
             self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
 
     def phi(self):
-        ims = [self.prev_bgr_frame, self.curr_bgr_frame]
-        x = np.max(ims, axis=0)
-        x = cv2.cvtColor(x, cv2.COLOR_RGB2YUV)[:, :, 0]
+        # ims = [self.prev_bgr_frame, self.curr_bgr_frame]
+        # x = np.max(ims, axis=0)
+        # x = cv2.cvtColor(x, cv2.COLOR_RGB2YUV)[:, :, 0]
+        # x = cv2.resize(x, (84, 84), interpolation=cv2.INTER_NEAREST)
+
+        x = self.curr_bgr_frame[5:195, :, :]
+        x = cv2.cvtColor(x, cv2.COLOR_BGR2GRAY)
         x = cv2.resize(x, (84, 84), interpolation=cv2.INTER_NEAREST)
+
         self.curr_frame = x
 
     def perform_action(self, init_flag=False):
@@ -434,14 +439,15 @@ class DQNEnvironment:
         if not init_flag:
             self.nn_input[0, :, :, :-1] = self.nn_input[0, :, :, 1:]
             self.nn_input[0, :, :, -1] = self.curr_frame
-        if done or self.num_lives <= 0:
-            self.env.seed()
-            self.curr_bgr_frame = self.env.reset()
-            self.first_run = True
+        if death:
             self.total_episode_ema_reward = np.mean([self.curr_episode_reward] + self.curr_episode_rewards)
             if self.curr_episode_reward > self.best_episode_reward:
                 self.best_episode_reward = self.curr_episode_reward
             self.curr_episode_reward = 0.
+        if done or self.num_lives <= 0:
+            # self.env.seed()
+            self.curr_bgr_frame = self.env.reset()
+            self.first_run = True
         if self.frame_count % self.write_video_every_n_frames == 0:
             self.write_video()
         return reward, death

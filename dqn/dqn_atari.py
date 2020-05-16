@@ -440,7 +440,7 @@ class DQNEnvironment:
             self.nn_input[0, :, :, :-1] = self.nn_input[0, :, :, 1:]
             self.nn_input[0, :, :, -1] = self.curr_frame
         if death:
-            self.total_episode_ema_reward = np.mean([self.curr_episode_reward] + self.curr_episode_rewards)
+            self.total_episode_ema_reward = self.curr_episode_reward
             if self.curr_episode_reward > self.best_episode_reward:
                 self.best_episode_reward = self.curr_episode_reward
             self.curr_episode_reward = 0.

@@ -43,8 +43,8 @@ def force_delete(fpath):
 
 class DQNEnvironment:
 
-    def __init__(self, env_name="Breakout-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
-                 replay_buffer_size=1000000, history_size=4, num_train_steps=1000000,
+    def __init__(self, env_name="MsPacman-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
+                 replay_buffer_size=1000000, history_size=4, num_train_steps=2000000,
                  batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=1000,
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
                  video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,
@@ -100,6 +100,7 @@ class DQNEnvironment:
                                 optimized_inference=True)
         self.frame_count = 0
         self.curr_train_step = 0
+        self.synced_param_train_step = 0
         self.flicker_buffer_size = flicker_buffer_size
         self.history_size = history_size
         self.sample_freq = sample_freq
@@ -212,7 +213,7 @@ class DQNEnvironment:
         s = self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
         self.dqn_constant.load(s)
         self.curr_train_step = self.dqn_action.step
-        self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
+        self.random_action_prob = np.clip(1. - ((1. / self.num_train_steps) * self.curr_train_step), .1, None)
         db_exists = os.path.isfile(self.cache_fpath + '.dat')
         if db_exists:
             print('Restoring train-state from training_cache at', self.cache_fpath + '.dat')
@@ -286,7 +287,8 @@ class DQNEnvironment:
             if self.frame_count >= self.replay_start_size:
                 self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
                 self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
-            if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0:
+            if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0 and \
+                self.curr_train_step - self.synced_param_train_step >= self.sync_freq:
                 self.sync_and_save_params()
         self.die()
         # except:
@@ -526,6 +528,7 @@ class DQNEnvironment:
         if not init_mode:
             self.write_video()
         self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False, save_model=not init_mode)
+        self.synced_param_train_step = self.curr_train_step
 
 
 if __name__ == '__main__':

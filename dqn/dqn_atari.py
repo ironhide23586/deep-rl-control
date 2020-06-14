@@ -43,11 +43,11 @@ def force_delete(fpath):
 
 class DQNEnvironment:
 
-    def __init__(self, env_name="MsPacman-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
+    def __init__(self, env_name="CartPole-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
                  replay_buffer_size=1000000, history_size=4, num_train_steps=2000000,
                  batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=1000,
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
-                 video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=False,
+                 video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=True,
                  max_replay_buffer_inmemory_size=20000, experience_db_sample_frac=.5,
                  refresh_replay_cache_every_n_experiences=10000, write_video_every_n_frames=36000):
         self.env_name = env_name
@@ -167,7 +167,7 @@ class DQNEnvironment:
                         (255, 255, 255))
             cv2.putText(im, str(round(l2_loss, 5)), (1, 118), cv2.FONT_HERSHEY_SIMPLEX, .2,
                         (200, 200, 200))
-            cv2.imwrite('im.png', im)
+            # cv2.imwrite('im.png', im)
             self.viz_frame_buffer.append(im)
 
     def rewards_preprocess(self, reward, info):
@@ -213,7 +213,7 @@ class DQNEnvironment:
         s = self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
         self.dqn_constant.load(s)
         self.curr_train_step = self.dqn_action.step
-        self.random_action_prob = np.clip(1. - ((1. / self.num_train_steps) * self.curr_train_step), .1, None)
+        self.update_random_action_prob()
         db_exists = os.path.isfile(self.cache_fpath + '.dat')
         if db_exists:
             print('Restoring train-state from training_cache at', self.cache_fpath + '.dat')
@@ -253,6 +253,13 @@ class DQNEnvironment:
             self.populate_experience()
             self.sync_and_save_params(init_mode=True)
 
+    def update_random_action_prob(self):
+        if self.curr_train_step < 1000000:
+            self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
+            self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
+        else:
+            self.random_action_prob = .1
+
     def train_agent(self):
         # try:
         print('Starting progress...')
@@ -285,8 +292,7 @@ class DQNEnvironment:
                 self.perform_action()
             self.populate_experience()
             if self.frame_count >= self.replay_start_size:
-                self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
-                self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
+                self.update_random_action_prob()
             if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0 and \
                 self.curr_train_step - self.synced_param_train_step >= self.sync_freq:
                 self.sync_and_save_params()

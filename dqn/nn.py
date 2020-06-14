@@ -96,6 +96,9 @@ class DQN:
             self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, decay=.95)
             self.grads_and_vars_tensor = self.opt.compute_gradients(self.loss, var_list=self.trainable_vars)
             self.grads_tensor = [gv[0] for gv in self.grads_and_vars_tensor if gv[0] is not None]
+            vars_tensor = [gv[1] for gv in self.grads_and_vars_tensor if gv[0] is not None]
+            self.grads_tensor = [tf.clip_by_value(g, -1, 1) for g in self.grads_tensor]
+            self.grads_and_vars_tensor = zip(self.grads_tensor, vars_tensor)
             self.train_op = self.opt.apply_gradients(self.grads_and_vars_tensor, global_step=self.step_ph,
                                                      name='rmsprop_train_op')
             self.saver = tf.train.Saver(max_to_keep=0)
@@ -233,6 +236,12 @@ class DQN:
                                                          self.actions_tensor: actions})
         # loss_np = np.mean(np.square(np.array(y) - np.array(q_pred)))
         # gm = np.mean([np.abs(g).mean() for g in grads])
+
+        # grad_minmaxs = np.array([(g.min(), g.max()) for g in grads])
+        # gmin = grad_minmaxs[:, 0].min()
+        # gmax = grad_minmaxs[:, 1].max()
+        # print(gmin, gmax, grad_minmaxs.mean(axis=0))
+
         self.step = step_tf  # Gradients vanishing before train step 11552
         self.learn_rate = lr  # 0 outs at layer 3 <tf.Tensor 'conv2d_5/Relu:0' shape=(?, 7, 7, 64) dtype=float32>
         # self.analyze_layer(x, 3)

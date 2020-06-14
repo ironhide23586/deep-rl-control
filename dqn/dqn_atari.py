@@ -44,12 +44,12 @@ def force_delete(fpath):
 class DQNEnvironment:
 
     def __init__(self, env_name="CartPole-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
-                 replay_buffer_size=1000000, history_size=4, num_train_steps=2000000,
-                 batch_size=32, viz=True, sync_freq=10000, replay_start_size=50000, viz_fps=60, num_plot_points=1000,
+                 replay_buffer_size=1000000, history_size=1, num_train_steps=10000,
+                 batch_size=32, viz=True, sync_freq=1000, replay_start_size=20, viz_fps=60, num_plot_points=1000,
                  episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
-                 video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=50, render=True,
+                 video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=5, render=True,
                  max_replay_buffer_inmemory_size=20000, experience_db_sample_frac=.5,
-                 refresh_replay_cache_every_n_experiences=10000, write_video_every_n_frames=36000):
+                 refresh_replay_cache_every_n_experiences=10000, write_video_every_n_frames=1000):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps
@@ -91,24 +91,26 @@ class DQNEnvironment:
         self.batch_size = batch_size
         self.sync_freq = sync_freq
         self.replay_start_size = replay_start_size
-        self.replay_break_even_train_step = 0
-
-        self.video_out_fpath_prefix = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-'
-        self.dqn_action = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
-                              model_prefix=self.env_name, num_train_steps=self.num_train_steps)
-        self.dqn_constant = DQN(num_classes=self.env.action_space.n, other_dqn=self.dqn_action,
-                                optimized_inference=True)
-        self.frame_count = 0
-        self.curr_train_step = 0
-        self.synced_param_train_step = 0
         self.flicker_buffer_size = flicker_buffer_size
         self.history_size = history_size
         self.sample_freq = sample_freq
         self.replay_buffer_size = replay_buffer_size
+        self.replay_break_even_train_step = 0
+
+        self.video_out_fpath_prefix = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-'
+        self.dqn_action = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
+                              model_prefix=self.env_name, num_train_steps=self.num_train_steps,
+                              num_input_channels=self.history_size)
+        self.dqn_constant = DQN(num_classes=self.env.action_space.n, other_dqn=self.dqn_action,
+                                optimized_inference=True, num_input_channels=self.history_size)
+        self.frame_count = 0
+        self.curr_train_step = 0
+        self.synced_param_train_step = 0
         self.random_action_prob = 1.
         self.replay_buffer_inmemory = []
         self.replay_buffer_db = None
-        self.nn_input = np.zeros([1, self.dqn_action.im_h, self.dqn_action.im_w, self.history_size])
+        # self.nn_input = np.zeros([1, self.dqn_action.im_h, self.dqn_action.im_w, self.history_size])
+        self.nn_input = np.zeros([1, 4, self.history_size])
         self.plot_frame_indices = []
         self.curr_episode_rewards = []
         self.best_episode_rewards = []
@@ -170,12 +172,17 @@ class DQNEnvironment:
             # cv2.imwrite('im.png', im)
             self.viz_frame_buffer.append(im)
 
-    def rewards_preprocess(self, reward, info):
-        death = False
-        if info['ale.lives'] < self.num_lives:
-            # reward = -1.
-            death = True
-        self.num_lives = info['ale.lives']
+    # def rewards_preprocess(self, reward, info):
+    #     death = False
+    #     if info['ale.lives'] < self.num_lives:
+    #         # reward = -1.
+    #         death = True
+    #     self.num_lives = info['ale.lives']
+    #     reward = np.clip(reward, -1, +1)
+    #     return reward, death
+
+    def rewards_preprocess(self, reward, done):
+        death = done
         reward = np.clip(reward, -1, +1)
         return reward, death
 
@@ -316,35 +323,38 @@ class DQNEnvironment:
         print('Exiting....🏃')
 
     def plot_stats(self):
-        n_plot_points = np.clip(self.num_plot_points, None, len(self.plot_frame_indices)).astype(np.int)
-        # idx = np.linspace(0, len(self.plot_frame_indices) - 1, n_plot_points).astype(np.int)
-        idx = np.sort(np.random.choice(np.arange(len(self.plot_frame_indices)), n_plot_points).astype(np.int))
-        frame_indices = np.array(self.plot_frame_indices)[idx]
-        curr_r = np.array(self.curr_episode_rewards)[idx]
-        best_r = np.array(self.best_episode_rewards)[idx]
-        ema_r = np.array(self.ema_episode_rewards)[idx]
-        plt.plot(frame_indices, curr_r, '-', label='Current Episode')
-        plt.plot(frame_indices, best_r, '-', label='Best Episode So Far')
-        plt.plot(frame_indices, ema_r, '-', label='Exponential Moving Average')
-        plt.legend(loc='best')
-        plt.xlabel('Frame Count')
-        plt.ylabel('Episodic Reward')
-        plt.tight_layout()
-        plt.savefig(self.curr_plots_dir + os.sep + 'rewards_plot.jpg')
-        plt.clf()
-        n_plot_points = np.clip(self.num_plot_points, None, len(self.plot_loss_train_steps)).astype(np.int)
-        # idx = np.linspace(0, len(self.plot_loss_train_steps) - 1, n_plot_points).astype(np.int)
-        idx = np.sort(np.random.choice(np.arange(len(self.plot_loss_train_steps)), n_plot_points).astype(np.int))
-        loss_indices = np.array(self.plot_loss_train_steps)[idx]
-        losses = np.array(self.plot_losses)[idx]
-        # losses = np.clip(losses, None, .0007)
-        plt.plot(loss_indices, losses, '-', label='Loss')
-        plt.legend(loc='best')
-        plt.xlabel('Train Step')
-        plt.ylabel('MSE Loss')
-        plt.tight_layout()
-        plt.savefig(self.curr_plots_dir + os.sep + 'loss_plot.jpg')
-        plt.clf()
+        try:
+            n_plot_points = np.clip(self.num_plot_points, None, len(self.plot_frame_indices)).astype(np.int)
+            # idx = np.linspace(0, len(self.plot_frame_indices) - 1, n_plot_points).astype(np.int)
+            idx = np.sort(np.random.choice(np.arange(len(self.plot_frame_indices)), n_plot_points).astype(np.int))
+            frame_indices = np.array(self.plot_frame_indices)[idx]
+            curr_r = np.array(self.curr_episode_rewards)[idx]
+            best_r = np.array(self.best_episode_rewards)[idx]
+            ema_r = np.array(self.ema_episode_rewards)[idx]
+            plt.plot(frame_indices, curr_r, '-', label='Current Episode')
+            plt.plot(frame_indices, best_r, '-', label='Best Episode So Far')
+            plt.plot(frame_indices, ema_r, '-', label='Exponential Moving Average')
+            plt.legend(loc='best')
+            plt.xlabel('Frame Count')
+            plt.ylabel('Episodic Reward')
+            plt.tight_layout()
+            plt.savefig(self.curr_plots_dir + os.sep + 'rewards_plot.jpg')
+            plt.clf()
+            n_plot_points = np.clip(self.num_plot_points, None, len(self.plot_loss_train_steps)).astype(np.int)
+            # idx = np.linspace(0, len(self.plot_loss_train_steps) - 1, n_plot_points).astype(np.int)
+            idx = np.sort(np.random.choice(np.arange(len(self.plot_loss_train_steps)), n_plot_points).astype(np.int))
+            loss_indices = np.array(self.plot_loss_train_steps)[idx]
+            losses = np.array(self.plot_losses)[idx]
+            # losses = np.clip(losses, None, .0007)
+            plt.plot(loss_indices, losses, '-', label='Loss')
+            plt.legend(loc='best')
+            plt.xlabel('Train Step')
+            plt.ylabel('MSE Loss')
+            plt.tight_layout()
+            plt.savefig(self.curr_plots_dir + os.sep + 'loss_plot.jpg')
+            plt.clf()
+        except:
+            print('Write failure, file in use; skipping plot writeout..')
 
     def populate_experience(self):
         if self.frame_count < self.replay_start_size or np.random.rand() < self.random_action_prob:
@@ -355,10 +365,10 @@ class DQNEnvironment:
             self.random_action_taken = False
             action = action_qvals.argmax()
         self.curr_action = action
-        nn_input_prev = self.nn_input.copy().astype(np.uint8)
+        nn_input_prev = self.nn_input.copy()  #.astype(np.uint8)
         reward, death = self.perform_action()
-        nn_input_new = self.nn_input.copy().astype(np.uint8)
-        experience = [self.experience_idx, nn_input_prev[0], action, nn_input_new[0][:, :, -1], reward, death,
+        nn_input_new = self.nn_input.copy()  #.astype(np.uint8)
+        experience = [self.experience_idx, nn_input_prev[0], action, nn_input_new[0][:, -1], reward, death,
                       self.curr_train_step, self.frame_count, self.random_action_taken, self.total_episode_ema_reward,
                       self.curr_episode_reward, self.best_episode_reward, self.loss, self.l2_loss]
         self.replay_buffer_inmemory.append(experience)
@@ -415,22 +425,23 @@ class DQNEnvironment:
         # x = cv2.cvtColor(x, cv2.COLOR_RGB2YUV)[:, :, 0]
         # x = cv2.resize(x, (84, 84), interpolation=cv2.INTER_NEAREST)
 
-        x = self.curr_bgr_frame[5:195, :, :]
-        x = cv2.cvtColor(x, cv2.COLOR_BGR2GRAY)
-        x = cv2.resize(x, (84, 84), interpolation=cv2.INTER_NEAREST)
+        # x = self.curr_bgr_frame[5:195, :, :]
+        # x = cv2.cvtColor(x, cv2.COLOR_BGR2GRAY)
+        # x = cv2.resize(x, (84, 84), interpolation=cv2.INTER_NEAREST)
 
-        self.curr_frame = x
+        # self.curr_frame = x
+        self.curr_frame = self.curr_bgr_frame
 
     def perform_action(self, init_flag=False):
         self.prev_bgr_frame = self.curr_bgr_frame.copy()
         self.curr_bgr_frame, reward, done, info = self.env.step(self.curr_action)
         if self.first_run:
             self.first_run = False
-            self.num_lives = info['ale.lives']
+            # self.num_lives = info['ale.lives']
         self.phi()
         if self.render:
             self.env.render()
-        reward, death = self.rewards_preprocess(reward, info)
+        reward, death = self.rewards_preprocess(reward, done)
         self.curr_episode_reward += reward
         self.frame_count += 1
         if self.frame_count % self.print_loss_every_n_steps == 0:
@@ -444,20 +455,24 @@ class DQNEnvironment:
             self.replay_break_even_train_step = self.curr_train_step
             self.random_exploration_active = False
             self.print_train_start_text()
-        if not init_flag:
-            self.nn_input[0, :, :, :-1] = self.nn_input[0, :, :, 1:]
-            self.nn_input[0, :, :, -1] = self.curr_frame
+        if not init_flag and self.nn_input.shape[-1] > 1:
+            # self.nn_input[0, :, :, :-1] = self.nn_input[0, :, :, 1:]
+            # self.nn_input[0, :, :, -1] = self.curr_frame
+            self.nn_input[0, :-1] = self.nn_input[:, 1:]
+            self.nn_input[0, -1] = self.curr_frame
+        else:
+            self.nn_input[0, :, 0] = self.curr_frame
         if death:
             self.total_episode_ema_reward = self.curr_episode_reward
             if self.curr_episode_reward > self.best_episode_reward:
                 self.best_episode_reward = self.curr_episode_reward
             self.curr_episode_reward = 0.
-        if done or self.num_lives <= 0:
+        if done:  # or self.num_lives <= 0:
             # self.env.seed()
             self.curr_bgr_frame = self.env.reset()
             self.first_run = True
-        if self.frame_count % self.write_video_every_n_frames == 0:
-            self.write_video()
+        # if self.frame_count % self.write_video_every_n_frames == 0:
+        #     self.write_video()
         return reward, death
 
     def sample_from_replay_memory(self, random=True, chunk_size=None):
@@ -485,9 +500,12 @@ class DQNEnvironment:
             _, nn_input_prev, action, new_frame, reward, death, train_step, frame_count, random_action_taken,\
             ema_r, curr_r, best_r, _, _ = self.replay_buffer_inmemory[int(i)]
             nn_input_new = np.zeros_like(nn_input_prev)
-            nn_input_new[:, :, :-1] = nn_input_prev[:, :, 1:]
-            nn_input_new[:, :, -1] = new_frame
-            # 0, 1 -> no-op; 2->Right, 3->Left
+
+            # nn_input_new[:, :, :-1] = nn_input_prev[:, :, 1:]
+            # nn_input_new[:, :, -1] = new_frame
+            nn_input_new[:, :-1] = nn_input_prev[:, 1:]
+            nn_input_new[:, -1] = new_frame
+
             action_qvals = self.dqn_constant.infer(np.expand_dims(nn_input_new, 0))
             max_qval = reward + self.discount_factor * action_qvals.max()
             if death:
@@ -531,8 +549,8 @@ class DQNEnvironment:
         print('Syncing Params of the 2 DQNs....')
         s = self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
         self.dqn_constant.load(s)
-        if not init_mode:
-            self.write_video()
+        # if not init_mode:
+        #     self.write_video()
         self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False, save_model=not init_mode)
         self.synced_param_train_step = self.curr_train_step
 

@@ -23,10 +23,10 @@ import cv2
 
 class DQN:
 
-    def __init__(self, num_classes, im_w=84, im_h=84, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
+    def __init__(self, num_classes, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
                  learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
-                 discount_factor=.99, update_batchnorm_means_vars=True, optimized_inference=False,
-                 load_training_vars=True, model_folder=None, model_prefix='model', other_dqn=None):
+                 discount_factor=.99, optimized_inference=False,model_folder=None, model_prefix='model',
+                 other_dqn=None, num_input_channels=4):
         if model_folder is None:
             self.model_folder = 'all_trained_models/trained_models'
         else:
@@ -36,8 +36,8 @@ class DQN:
         self.model_prefix = model_prefix
         self.model_fpath_prefix = self.model_folder + '/' + model_prefix + '-'
         self.num_classes = num_classes
-        self.im_h = im_h
-        self.im_w = im_w
+        # self.im_h = im_h
+        # self.im_w = im_w
         self.other_dqn = other_dqn
         self.num_train_steps = num_train_steps
         self.compute_bn_mean_var = compute_bn_mean_var
@@ -47,7 +47,10 @@ class DQN:
 
         with self.g.as_default():
             n0 = len(tf.global_variables())
-            self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, 4])
+            # self.x_tensor = tf.placeholder(tf.float32, shape=[None, self.im_h, self.im_w, num_input_channels])
+            # self.feature_len = self.im_h * self.im_w * num_input_channels
+            self.x_tensor = tf.placeholder(tf.float32, shape=[None, 4, num_input_channels])
+            self.feature_len = 4 * num_input_channels
             self.actions_tensor = tf.placeholder(tf.int32, shape=[None])
             self.layers = [self.x_tensor]
             self.param_tensors_layerwise = [[]]
@@ -157,8 +160,9 @@ class DQN:
         print('Model restored from', model_path)
 
     def infer(self, im_in):
-        im = im_in / 255.
+        # im = im_in / 255.
         # self.viz_inputs(im, 'infer')
+        im = im_in
         if self.dropout_enabled:
             outs = self.sess.run(self.y_pred, feed_dict={self.x_tensor: im, self.dropout_rate_tensor: 0.})
         else:
@@ -177,12 +181,12 @@ class DQN:
         return x_pp
 
     def infer_optimized(self, im_in):
-        im = self.center_crop(im_in)
-        h, w, _ = im.shape
-        if h != self.im_h or w != self.im_w:
-            im = cv2.resize(im, (self.im_w, self.im_h))
-        im = im_in / 255.
-        im = np.expand_dims(im, 0)
+        # im = self.center_crop(im_in)
+        # h, w, _ = im.shape
+        # if h != self.im_h or w != self.im_w:
+        #     im = cv2.resize(im, (self.im_w, self.im_h))
+        # im = im_in / 255.
+        im = np.expand_dims(im_in, 0)
         out_label_idx, out_label_conf, out_label_logits = self.sess.run(self.outs_final, feed_dict={self.x_tensor: im})
         return out_label_idx, out_label_conf, out_label_logits
 
@@ -217,9 +221,10 @@ class DQN:
         return raw_outs
 
     def train_step(self, x_in, y, actions):
-        x = x_in / 255.
+        # x = x_in / 255.
         # self.viz_inputs(x, 'train')
         # self.viz_layer_outs(self.layers[0], x)
+        x = x_in
         if self.dropout_enabled:
             l2_loss, loss, _, step_tf = self.sess.run([self.reduced_loss, self.loss, self.train_op, self.step_ph],
                                                       feed_dict={self.x_tensor: x,
@@ -361,20 +366,28 @@ class DQN:
     # Architecture from paper https://web.stanford.edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf
     def init_nn_graph(self):
         n = len(tf.trainable_variables())
-        feature_extractor_bn_mean_var_compute = False
-        layer_outs = self.conv_block(self.x_tensor, 32, kernel_size=8, kernel_stride=4,
-                                     compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = self.conv_block(layer_outs, 64, kernel_size=4, kernel_stride=2,
-                                     compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
-        layer_outs = self.conv_block(layer_outs, 64, kernel_size=3, kernel_stride=1,
-                                     compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
+        # feature_extractor_bn_mean_var_compute = False
 
-        shp = layer_outs.shape
-        flat_len = shp[1] * shp[2] * shp[3]
+        # layer_outs = self.conv_block(self.x_tensor, 32, kernel_size=8, kernel_stride=4,
+        #                              compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
+        # layer_outs = self.conv_block(layer_outs, 64, kernel_size=4, kernel_stride=2,
+        #                              compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
+        # layer_outs = self.conv_block(layer_outs, 64, kernel_size=3, kernel_stride=1,
+        #                              compute_bn_mean_var=feature_extractor_bn_mean_var_compute)
+        #
+        # shp = layer_outs.shape
+        # flat_len = shp[1] * shp[2] * shp[3]
+        #
+        # layer_outs = self.dense_block(tf.reshape(layer_outs, [-1, flat_len]), 512, activation=tf.nn.relu)
+        # layer_outs = self.dense_block(layer_outs, self.num_classes, activation=None)
+        # layer_outs = tf.identity(layer_outs, name='qval_pred')
 
-        layer_outs = self.dense_block(tf.reshape(layer_outs, [-1, flat_len]), 512, activation=tf.nn.relu)
-        layer_outs = self.dense_block(layer_outs, self.num_classes, activation=None)
+        layer_outs = self.dense_block(tf.reshape(self.x_tensor, [-1, self.feature_len]), 16)
+        layer_outs = self.dense_block(layer_outs, 32)
+        layer_outs = self.dense_block(layer_outs, 32)
+        layer_outs = self.dense_block(layer_outs, self.num_classes)
         layer_outs = tf.identity(layer_outs, name='qval_pred')
+
         stop_grad_vars_and_ops = [[], []]
         trainable_vars = tf.trainable_variables()[n:]
         return layer_outs, trainable_vars, stop_grad_vars_and_ops

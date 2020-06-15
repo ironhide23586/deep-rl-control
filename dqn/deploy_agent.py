@@ -12,7 +12,6 @@ Author: Souham Biswas
 Website: https://www.linkedin.com/in/souham/
 """
 
-import os
 
 import gym
 import numpy as np

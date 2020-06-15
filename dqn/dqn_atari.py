@@ -191,7 +191,7 @@ class DQNEnvironment:
         death = done
         if death:
             self.num_episodes += 1
-            reward = 0
+            reward = -1
         reward = np.clip(reward, -1, +1)
         if reward > 0:
             self.curr_episode_pos_reward_count += 1
@@ -383,7 +383,10 @@ class DQNEnvironment:
         self.curr_action = action
         nn_input_prev = self.nn_input.copy()  #.astype(np.uint8)
         reward, death = self.perform_action()
-        nn_input_new = self.nn_input.copy()  #.astype(np.uint8)
+        if not death:
+            nn_input_new = self.nn_input.copy()  #.astype(np.uint8)
+        else:
+            nn_input_new = np.zeros_like(self.nn_input)
         experience = [self.experience_idx, nn_input_prev[0], action, nn_input_new[0][:, -1], reward, death,
                       self.curr_train_step, self.frame_count, self.random_action_taken, self.total_episode_ema_reward,
                       self.curr_episode_reward, self.best_episode_reward, self.loss, self.l2_loss]

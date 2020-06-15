@@ -35,8 +35,8 @@ def huber_loss(x, y):
 class DQN:
 
     def __init__(self, num_classes, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
-                 learn_rate=2.5e-4, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
-                 discount_factor=.99, optimized_inference=False,model_folder=None, model_prefix='model',
+                 learn_rate=1e-4, l2_regularizer_coeff=1e-2, num_train_steps=1000000, dropout_rate=.3,
+                 discount_factor=.99, optimized_inference=False, model_folder=None, model_prefix='model',
                  other_dqn=None, num_input_channels=4):
         if model_folder is None:
             self.model_folder = 'all_trained_models/trained_models'
@@ -109,7 +109,10 @@ class DQN:
             l2_losses = [self.l2_regularizer_coeff * tf.nn.l2_loss(v) for v in self.trainable_vars]
             self.loss = tf.reduce_mean(self.loss_op)
             self.reduced_loss = self.loss + tf.add_n(l2_losses)
-            self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, decay=.95)
+
+            # self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, decay=.95)
+            self.opt = tf.train.AdamOptimizer(learning_rate=self.learn_rate_tf)
+
             self.grads_and_vars_tensor = self.opt.compute_gradients(self.loss, var_list=self.trainable_vars)
             self.grads_tensor = [gv[0] for gv in self.grads_and_vars_tensor if gv[0] is not None]
             vars_tensor = [gv[1] for gv in self.grads_and_vars_tensor if gv[0] is not None]
@@ -398,7 +401,7 @@ class DQN:
         layer_outs = self.dense_block(tf.reshape(self.x_tensor, [-1, self.feature_len]), 16)
         layer_outs = self.dense_block(layer_outs, 32)
         layer_outs = self.dense_block(layer_outs, 32)
-        layer_outs = self.dense_block(layer_outs, self.num_classes)
+        layer_outs = self.dense_block(layer_outs, self.num_classes, activation=None)
         layer_outs = tf.identity(layer_outs, name='qval_pred')
 
         stop_grad_vars_and_ops = [[], []]

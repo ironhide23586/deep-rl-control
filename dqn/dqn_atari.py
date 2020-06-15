@@ -48,11 +48,12 @@ class DQNEnvironment:
                  replay_start_size=2, viz_fps=60, num_plot_points=1000, discount_factor=.99,
                  replay_memory_cache_fname='training_cache.db', video_prefix='shm_dqn', run_dir_prefix='run',
                  print_loss_every_n_steps=100, render=False, max_replay_buffer_inmemory_size=2000000,
-                 experience_db_sample_frac=.5, start_epsilon=1., end_epsilon=.05,
+                 experience_db_sample_frac=.5, start_epsilon=1., end_epsilon=.05, write_experiences_to_disk=False,
                  refresh_replay_cache_every_n_experiences=10000000, write_video_every_n_frames=1000):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps
+        self.write_experiences_to_disk = write_experiences_to_disk
         self.num_plot_points = num_plot_points
         self.write_video_every_n_frames = write_video_every_n_frames
         self.refresh_replay_cache_every_n_experiences = refresh_replay_cache_every_n_experiences
@@ -263,7 +264,8 @@ class DQNEnvironment:
                 self.random_exploration_active = False
             self.replay_buffer_db.close()
             self.experience_idx = int(last_experience_idx) + 1
-            self.write_and_refresh_replay_buffer_inmemory()
+            if self.write_experiences_to_disk:
+                self.write_and_refresh_replay_buffer_inmemory()
         for _ in range(self.history_size):
             self.curr_action = self.env.action_space.sample()
             self.random_action_taken = True
@@ -395,7 +397,8 @@ class DQNEnvironment:
         self.plot_losses.append(self.loss)
         self.plot_l2_losses.append(self.l2_loss)
         if self.experience_idx % self.refresh_replay_cache_every_n_experiences == 0\
-                or len(self.replay_buffer_inmemory) >= self.max_replay_buffer_inmemory_size:
+                or len(self.replay_buffer_inmemory) >= self.max_replay_buffer_inmemory_size and\
+                self.write_experiences_to_disk:
             cache_writeout = not self.random_exploration_active
             self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=cache_writeout)
 
@@ -570,7 +573,9 @@ class DQNEnvironment:
         self.dqn_constant.load(s)
         if not init_mode and self.viz:
             self.write_video()
-        self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False, save_model=not init_mode)
+        if self.write_experiences_to_disk:
+            self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False,
+                                                          save_model=not init_mode)
         self.synced_param_train_step = self.curr_train_step
 
 

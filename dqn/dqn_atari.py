@@ -43,13 +43,13 @@ def force_delete(fpath):
 
 class DQNEnvironment:
 
-    def __init__(self, env_name="CartPole-v0", root_dir='atari_games', flicker_buffer_size=2, sample_freq=4,
-                 replay_buffer_size=1000000, history_size=1, num_train_steps=10000,
-                 batch_size=32, viz=True, sync_freq=1000, replay_start_size=20, viz_fps=60, num_plot_points=1000,
-                 episodic_reward_ema_alpha=.7, discount_factor=.99, replay_memory_cache_fname='training_cache.db',
-                 video_prefix='shm_dqn', run_dir_prefix='run', print_loss_every_n_steps=5, render=True,
-                 max_replay_buffer_inmemory_size=20000, experience_db_sample_frac=.5,
-                 refresh_replay_cache_every_n_experiences=10000, write_video_every_n_frames=1000):
+    def __init__(self, env_name="CartPole-v0", root_dir='atari_games', sample_freq=0,
+                 history_size=1, num_train_steps=100000, batch_size=128, viz=False, sync_freq=100000,
+                 replay_start_size=2, viz_fps=60, num_plot_points=1000, discount_factor=.99,
+                 replay_memory_cache_fname='training_cache.db', video_prefix='shm_dqn', run_dir_prefix='run',
+                 print_loss_every_n_steps=100, render=False, max_replay_buffer_inmemory_size=2000000,
+                 experience_db_sample_frac=.5, start_epsilon=1., end_epsilon=.05,
+                 refresh_replay_cache_every_n_experiences=10000000, write_video_every_n_frames=1000):
         self.env_name = env_name
         self.root_dir = root_dir
         self.viz_fps = viz_fps
@@ -69,6 +69,9 @@ class DQNEnvironment:
         self.experience_idx = 0
         self.l2_loss = 0.
         self.loss = 0.
+        self.num_episodes = 0
+        self.curr_episode_pos_reward_count = 0
+        self.curr_episode_nopos_reward_count = 0
         force_makedir(self.env_out_dir)
         run_dirs = glob(self.env_out_dir + os.sep + 'run-*')
         self.run_id = 0
@@ -86,18 +89,18 @@ class DQNEnvironment:
         if viz:
             self.video_out_dir = self.curr_env_out_dir + os.sep + 'video_outs'
             force_makedir(self.video_out_dir)
+            self.video_out_fpath_prefix = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-'
         self.env = gym.make(self.env_name)
         self.num_lives = None
         self.batch_size = batch_size
         self.sync_freq = sync_freq
         self.replay_start_size = replay_start_size
-        self.flicker_buffer_size = flicker_buffer_size
+        # self.flicker_buffer_size = flicker_buffer_size
         self.history_size = history_size
         self.sample_freq = sample_freq
-        self.replay_buffer_size = replay_buffer_size
+        # self.replay_buffer_size = replay_buffer_size
         self.replay_break_even_train_step = 0
 
-        self.video_out_fpath_prefix = self.video_out_dir + os.sep + video_prefix + '-' + self.env_name + '-'
         self.dqn_action = DQN(num_classes=self.env.action_space.n, model_folder=self.curr_models_dir,
                               model_prefix=self.env_name, num_train_steps=self.num_train_steps,
                               num_input_channels=self.history_size)
@@ -106,7 +109,9 @@ class DQNEnvironment:
         self.frame_count = 0
         self.curr_train_step = 0
         self.synced_param_train_step = 0
-        self.random_action_prob = 1.
+        self.start_epsilon = start_epsilon
+        self.end_epsilon = end_epsilon
+        self.random_action_prob = self.start_epsilon
         self.replay_buffer_inmemory = []
         self.replay_buffer_db = None
         # self.nn_input = np.zeros([1, self.dqn_action.im_h, self.dqn_action.im_w, self.history_size])
@@ -132,7 +137,7 @@ class DQNEnvironment:
         self.curr_episode_reward = 0.
         self.best_episode_reward = 0.
         self.total_episode_ema_reward = 0.  # exponential moving average of all episodic rewards
-        self.episodic_reward_ema_alpha = episodic_reward_ema_alpha
+        # self.episodic_reward_ema_alpha = episodic_reward_ema_alpha
         self.video_buffer = Queue()
         self.init()
         self.video_start_train_step = self.curr_train_step
@@ -183,7 +188,14 @@ class DQNEnvironment:
 
     def rewards_preprocess(self, reward, done):
         death = done
+        if death:
+            self.num_episodes += 1
+            reward = 0
         reward = np.clip(reward, -1, +1)
+        if reward > 0:
+            self.curr_episode_pos_reward_count += 1
+        else:
+            self.curr_episode_nopos_reward_count += 1
         return reward, death
 
     def write_video_worker(self):
@@ -263,9 +275,9 @@ class DQNEnvironment:
     def update_random_action_prob(self):
         if self.curr_train_step < 1000000:
             self.random_action_prob = 1. - ((1. / self.num_train_steps) * self.curr_train_step)
-            self.random_action_prob = np.clip(self.random_action_prob, .1, 1.)
+            self.random_action_prob = np.clip(self.random_action_prob, self.end_epsilon, self.start_epsilon)
         else:
-            self.random_action_prob = .1
+            self.random_action_prob = self.end_epsilon
 
     def train_agent(self):
         # try:
@@ -300,8 +312,10 @@ class DQNEnvironment:
             self.populate_experience()
             if self.frame_count >= self.replay_start_size:
                 self.update_random_action_prob()
-            if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0 and \
-                self.curr_train_step - self.synced_param_train_step >= self.sync_freq:
+            # if self.curr_train_step % self.sync_freq == 0 and self.curr_train_step > 0 and \
+            #     self.curr_train_step - self.synced_param_train_step >= self.sync_freq:
+            #     self.sync_and_save_params()
+            if self.num_episodes % 100 == 0 and self.curr_train_step - self.synced_param_train_step >= 50:
                 self.sync_and_save_params()
         self.die()
         # except:
@@ -469,10 +483,15 @@ class DQNEnvironment:
             self.curr_episode_reward = 0.
         if done:  # or self.num_lives <= 0:
             # self.env.seed()
+            # if self.curr_episode_nopos_reward_count >= self.curr_episode_pos_reward_count:
+            #     self.curr_bgr_frame = self.env.reset()
+            #     self.curr_episode_pos_reward_count = 0
+            #     self.curr_episode_nopos_reward_count = 0
+
             self.curr_bgr_frame = self.env.reset()
             self.first_run = True
-        # if self.frame_count % self.write_video_every_n_frames == 0:
-        #     self.write_video()
+        if self.frame_count % self.write_video_every_n_frames == 0 and self.viz:
+            self.write_video()
         return reward, death
 
     def sample_from_replay_memory(self, random=True, chunk_size=None):
@@ -549,8 +568,8 @@ class DQNEnvironment:
         print('Syncing Params of the 2 DQNs....')
         s = self.dqn_action.save(str(round(self.total_episode_ema_reward, 2)))
         self.dqn_constant.load(s)
-        # if not init_mode:
-        #     self.write_video()
+        if not init_mode and self.viz:
+            self.write_video()
         self.write_and_refresh_replay_buffer_inmemory(refresh_inememory_experiences=False, save_model=not init_mode)
         self.synced_param_train_step = self.curr_train_step
 

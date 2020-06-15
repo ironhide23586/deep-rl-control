@@ -21,6 +21,17 @@ import numpy as np
 import cv2
 
 
+def huber_loss(x, y):
+    #  implementation from -
+    #  https://www.thiscodeworks.com/squared-error-example-in-tensorflow-python/5dc3700ab64d6c001499ebc0
+    avg = tf.reduce_mean(x - y)
+    cond = tf.less(avg, 0)
+    left_op = tf.reduce_mean(tf.square(x - y))
+    right_op = tf.reduce_mean(tf.abs(x - y))
+    out = tf.where(cond, left_op, right_op)  # tf.select() has been fucking deprecated
+    return out
+
+
 class DQN:
 
     def __init__(self, num_classes, compute_bn_mean_var=True, start_step=0, dropout_enabled=False,
@@ -89,7 +100,9 @@ class DQN:
 
             self.q_pred = tf.reduce_sum(self.y_pred * tf.one_hot(self.actions_tensor, self.num_classes), axis=1)
 
-            self.loss_op = tf.math.squared_difference(self.q_pred, self.y_gt)
+            # self.loss_op = tf.math.squared_difference(self.q_pred, self.y_gt)
+            self.loss_op = huber_loss(self.q_pred, self.y_gt)
+
             self.learn_rate_tf = tf.train.polynomial_decay(self.learn_rate_tf, global_step=self.step_ph,
                                                            decay_steps=self.num_train_steps, end_learning_rate=1e-6)
 

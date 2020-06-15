@@ -21,15 +21,12 @@ import numpy as np
 import cv2
 
 
-def huber_loss(x, y):
-    #  implementation from -
-    #  https://www.thiscodeworks.com/squared-error-example-in-tensorflow-python/5dc3700ab64d6c001499ebc0
-    avg = tf.reduce_mean(x - y)
-    cond = tf.less(avg, 0)
-    left_op = tf.reduce_mean(tf.square(x - y))
-    right_op = tf.reduce_mean(tf.abs(x - y))
-    out = tf.where(cond, left_op, right_op)  # tf.select() has been fucking deprecated
-    return out
+def huber_loss(x, y, d=1.):
+    err = tf.abs(y - x)
+    quad = tf.minimum(err, d)
+    lin = err - quad
+    losses = (.5 * quad) + (d * lin)
+    return losses
 
 
 class DQN:

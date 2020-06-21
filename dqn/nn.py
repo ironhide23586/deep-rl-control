@@ -96,6 +96,9 @@ class DQN:
             self.opt = tf.train.RMSPropOptimizer(learning_rate=self.learn_rate_tf, decay=.95)
             self.grads_and_vars_tensor = self.opt.compute_gradients(self.loss, var_list=self.trainable_vars)
             self.grads_tensor = [gv[0] for gv in self.grads_and_vars_tensor if gv[0] is not None]
+            vars_tensor = [gv[1] for gv in self.grads_and_vars_tensor if gv[0] is not None]
+            self.grads_tensor = [tf.clip_by_value(g, -1, 1) for g in self.grads_tensor]
+            self.grads_and_vars_tensor = zip(self.grads_tensor, vars_tensor)
             self.train_op = self.opt.apply_gradients(self.grads_and_vars_tensor, global_step=self.step_ph,
                                                      name='rmsprop_train_op')
             self.saver = tf.train.Saver(max_to_keep=0)
